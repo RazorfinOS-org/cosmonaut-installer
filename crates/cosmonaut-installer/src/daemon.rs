@@ -23,6 +23,14 @@ trait Installer {
 
     async fn cancel(&self) -> zbus::Result<bool>;
 
+    async fn is_online(&self) -> zbus::Result<bool>;
+
+    async fn is_tpm2_available(&self) -> zbus::Result<bool>;
+
+    async fn scan_wifi(&self) -> zbus::Result<Vec<(String, String, u32, bool)>>;
+
+    async fn connect_wifi(&self, ssid: &str, passphrase: &str) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn step_changed(&self, step: &str, detail: &str) -> zbus::Result<()>;
 
@@ -31,6 +39,83 @@ trait Installer {
 
     #[zbus(signal)]
     fn completed(&self, success: bool, error: &str) -> zbus::Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub security: String,
+    pub signal: u8,
+    pub connected: bool,
+}
+
+/// Async helper used by App's startup probe — queries the daemon for
+/// `is_online()`. Returns `Ok(true)` if a default IPv4 route exists,
+/// `Ok(false)` if not, `Err` on DBus failure.
+pub async fn is_online() -> Result<bool, String> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    let proxy = InstallerProxy::new(&conn)
+        .await
+        .map_err(|e| format!("proxy: {e}"))?;
+    proxy
+        .is_online()
+        .await
+        .map_err(|e| format!("is_online: {e}"))
+}
+
+/// Probe whether the host has a TPM2 device. Errors (DBus unreachable,
+/// daemon not present) are treated as "not available" by the caller.
+pub async fn is_tpm2_available() -> Result<bool, String> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    let proxy = InstallerProxy::new(&conn)
+        .await
+        .map_err(|e| format!("proxy: {e}"))?;
+    proxy
+        .is_tpm2_available()
+        .await
+        .map_err(|e| format!("is_tpm2_available: {e}"))
+}
+
+/// Trigger an iwd scan via the daemon and return the network list.
+pub async fn scan_wifi() -> Result<Vec<WifiNetwork>, String> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    let proxy = InstallerProxy::new(&conn)
+        .await
+        .map_err(|e| format!("proxy: {e}"))?;
+    let raw = proxy
+        .scan_wifi()
+        .await
+        .map_err(|e| format!("scan_wifi: {e}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|(ssid, security, signal, connected)| WifiNetwork {
+            ssid,
+            security,
+            signal: signal.min(u32::from(u8::MAX)) as u8,
+            connected,
+        })
+        .collect())
+}
+
+/// Connect to `ssid` with `passphrase`. Blocks until iwd reports
+/// success/failure.
+pub async fn connect_wifi(ssid: String, passphrase: String) -> Result<(), String> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    let proxy = InstallerProxy::new(&conn)
+        .await
+        .map_err(|e| format!("proxy: {e}"))?;
+    proxy
+        .connect_wifi(&ssid, &passphrase)
+        .await
+        .map_err(|e| format!("connect_wifi: {e}"))
 }
 
 /// Events forwarded from DBus signals to the GUI's `update()` loop.

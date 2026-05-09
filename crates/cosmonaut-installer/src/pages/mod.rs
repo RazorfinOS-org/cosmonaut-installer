@@ -11,11 +11,13 @@ pub mod encryption;
 pub mod image;
 pub mod progress;
 pub mod welcome;
+pub mod wifi;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Welcome,
     Image,
+    Wifi,
     Disk,
     Encryption,
     Confirm,
@@ -29,6 +31,7 @@ impl Page {
         match self {
             Self::Welcome => "Welcome",
             Self::Image => "Image",
+            Self::Wifi => "Wifi",
             Self::Disk => "Disk",
             Self::Encryption => "Encryption",
             Self::Confirm => "Confirm",

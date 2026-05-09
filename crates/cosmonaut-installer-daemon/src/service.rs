@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
+use crate::wifi;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunState {
     Idle,
@@ -205,6 +207,52 @@ impl Installer {
             .map(Step::as_str)
             .unwrap_or("")
             .to_owned()
+    }
+
+    /// Detect a default IPv4 route so the wizard can auto-skip the
+    /// wifi page on already-online systems (typical wired live env).
+    async fn is_online(&self) -> fdo::Result<bool> {
+        wifi::is_online()
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Detect a TPM2 device on the host. The GUI uses this to gray
+    /// out the TPM2-LUKS radio options when no TPM is present (e.g.
+    /// QEMU without -tpmdev).
+    async fn is_tpm2_available(&self) -> fdo::Result<bool> {
+        Ok(wifi::is_tpm2_available())
+    }
+
+    /// Scan for visible wireless networks via iwd. Returns
+    /// `[(ssid, security, signal, connected), ...]` ordered as iwd
+    /// returned them. Errors with `Failed` if no wireless device is
+    /// present or iwctl is not installed.
+    async fn scan_wifi(&self) -> fdo::Result<Vec<(String, String, u32, bool)>> {
+        let device = wifi::first_wireless_device()
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?
+            .ok_or_else(|| fdo::Error::Failed("no wireless device available".into()))?;
+        let nets = wifi::scan(&device)
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        Ok(nets
+            .into_iter()
+            .map(|n| (n.ssid, n.security, u32::from(n.signal), n.connected))
+            .collect())
+    }
+
+    /// Connect to `ssid` with `passphrase`. Blocks until iwd reports
+    /// success or failure. Polkit-gated (not enforced in the live env's
+    /// allow-rule for cosmic-live).
+    async fn connect_wifi(&self, ssid: String, passphrase: String) -> fdo::Result<()> {
+        let device = wifi::first_wireless_device()
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?
+            .ok_or_else(|| fdo::Error::Failed("no wireless device available".into()))?;
+        wifi::connect(&device, &ssid, &passphrase)
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     #[zbus(signal)]

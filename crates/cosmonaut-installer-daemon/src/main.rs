@@ -10,6 +10,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing_subscriber::EnvFilter;
 
 mod service;
+mod wifi;
 
 const BUS_NAME: &str = "dev.cosmonaut.Installer1";
 const OBJECT_PATH: &str = "/dev/cosmonaut/Installer1";
