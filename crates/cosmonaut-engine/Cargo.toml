@@ -1,0 +1,15 @@
+[package]
+name = "cosmonaut-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Install orchestrator for cosmonaut-installer"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+nix = { workspace = true }
+tokio = { workspace = true }

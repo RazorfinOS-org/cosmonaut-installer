@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=dev.cosmonaut.Installer1
+Exec=/bin/false
+User=root
+SystemdService=dev.cosmonaut.Installer1.service

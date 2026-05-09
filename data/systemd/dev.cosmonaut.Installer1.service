@@ -1,0 +1,16 @@
+[Unit]
+Description=COSMIC Installer privileged backend
+Documentation=https://github.com/razorfinos-org/cosmonaut-installer
+
+[Service]
+Type=dbus
+BusName=dev.cosmonaut.Installer1
+ExecStart=/usr/libexec/cosmonaut-installer-daemon
+# DBus-activated; idle-exits ~30s after the install completes (engine
+# signals Completed and the daemon schedules its own shutdown).
+Restart=no
+# Privileged install needs root + the world.
+User=root
+# Cancel cleanup steps need a known shell.
+StandardOutput=journal
+StandardError=journal

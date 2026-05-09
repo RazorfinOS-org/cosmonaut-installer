@@ -1,0 +1,13 @@
+[package]
+name = "cosmonaut-installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "libcosmic GUI for installing COSMIC bootc images"
+
+[dependencies]
+libcosmic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install COSMIC
+Comment=Install COSMIC to your computer
+Exec=cosmonaut-installer
+Icon=dev.cosmonaut.Installer
+Terminal=false
+Categories=System;
+OnlyShowIn=COSMIC;
