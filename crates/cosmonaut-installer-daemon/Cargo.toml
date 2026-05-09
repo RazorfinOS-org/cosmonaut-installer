@@ -10,6 +10,9 @@ description = "DBus system service hosting the cosmonaut install engine"
 [dependencies]
 cosmonaut-engine = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 zbus = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

@@ -1,6 +1,11 @@
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod daemon;
+mod disks;
+mod images_json;
+mod pages;
+mod spec;
 
 fn main() -> cosmic::iced::Result {
     tracing_subscriber::fmt()

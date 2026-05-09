@@ -24,15 +24,22 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "c423ad1bfc
 
 # Async + DBus
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "signal", "time"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["io-util"] }
+tokio-util = { version = "0.7", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+zvariant = { version = "5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
 
-# Engine deps (Phase 1+, declared up front so workspace resolves consistently)
+# Engine deps
 nix = { version = "0.29", features = ["mount", "fs"] }
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = "thin"

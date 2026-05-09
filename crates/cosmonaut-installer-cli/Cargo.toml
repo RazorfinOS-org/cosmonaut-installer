@@ -9,6 +9,9 @@ description = "Headless driver for the cosmonaut-installer daemon"
 
 [dependencies]
 tokio = { workspace = true }
+futures-util = { workspace = true }
 zbus = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
