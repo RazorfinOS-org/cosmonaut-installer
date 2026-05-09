@@ -16,6 +16,58 @@ pub use crate::mount::TARGET_ROOT;
 /// Where skopeo writes the OCI layout for `--source-imgref oci:…`.
 const OCI_CACHE_DIR: &str = "/run/cosmonaut/scratch/oci-cache";
 
+/// Transport prefixes skopeo recognises. If a user-supplied image ref
+/// starts with one of these, pass it through verbatim; otherwise wrap
+/// in `docker://` (the natural default for registry refs).
+const SKOPEO_TRANSPORTS: &[&str] = &[
+    "docker://",
+    "docker-archive:",
+    "docker-daemon:",
+    "oci:",
+    "oci-archive:",
+    "containers-storage:",
+    "dir:",
+    "tarball:",
+    "ostree:",
+];
+
+fn skopeo_source(image: &str) -> String {
+    if SKOPEO_TRANSPORTS.iter().any(|p| image.starts_with(p)) {
+        image.to_string()
+    } else {
+        format!("docker://{image}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_ref_gets_docker_prefix() {
+        assert_eq!(
+            skopeo_source("ngcr.io/foo/bar:nightly"),
+            "docker://ngcr.io/foo/bar:nightly"
+        );
+        assert_eq!(
+            skopeo_source("ghcr.io/example/image:v1.2.3"),
+            "docker://ghcr.io/example/image:v1.2.3"
+        );
+    }
+
+    #[test]
+    fn explicit_transport_passes_through() {
+        for s in [
+            "docker://ngcr.io/foo:1",
+            "oci:/tmp/foo",
+            "containers-storage:localhost/foo:latest",
+            "oci-archive:/tmp/foo.tar",
+        ] {
+            assert_eq!(skopeo_source(s), s);
+        }
+    }
+}
+
 pub async fn run(
     image: &str,
     events: &mpsc::Sender<Event>,
@@ -25,9 +77,15 @@ pub async fn run(
         .await
         .context("mkdir scratch")?;
 
-    // 1. skopeo copy <image> oci:/run/cosmonaut/scratch/oci-cache
+    // 1. skopeo copy <image> oci:/run/cosmonaut/scratch/oci-cache.
+    // skopeo requires an explicit transport prefix on both ends; bare
+    // registry refs like "ngcr.io/foo:nightly" error immediately with
+    // "Invalid image name". Default to docker:// when no transport
+    // prefix is present (matches the registry pull that bootc would
+    // do on its own).
+    let source = skopeo_source(image);
     let dest = format!("oci:{OCI_CACHE_DIR}");
-    let skopeo_args: [&str; 3] = ["copy", image, &dest];
+    let skopeo_args: [&str; 3] = ["copy", &source, &dest];
     let copy_fut = runner::run("skopeo", &skopeo_args, events);
     tokio::select! {
         biased;
