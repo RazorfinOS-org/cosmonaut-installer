@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
 <policyconfig>
   <vendor>cosmonaut-installer</vendor>
-  <vendor_url>https://github.com/razorfinos-org/cosmonaut-installer</vendor_url>
+  <vendor_url>https://github.com/RazorfinOS-org/cosmonaut-installer</vendor_url>
 
   <action id="dev.cosmonaut.installer.install">
     <description>Install COSMIC to a disk</description>

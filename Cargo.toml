@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-repository = "https://github.com/razorfinos-org/cosmonaut-installer"
+repository = "https://github.com/RazorfinOS-org/cosmonaut-installer"
 rust-version = "1.80"
 
 [workspace.dependencies]
