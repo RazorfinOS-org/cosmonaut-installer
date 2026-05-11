@@ -3,8 +3,14 @@ use cosmic::widget::{button, column, container, row, text};
 use cosmic::Element;
 
 use crate::app::Message;
+use crate::branding::Branding;
 
-pub fn view<'a>(success: bool, error: &'a str, countdown: Option<u8>) -> Element<'a, Message> {
+pub fn view<'a>(
+    branding: &'a Branding,
+    success: bool,
+    error: &'a str,
+    countdown: Option<u8>,
+) -> Element<'a, Message> {
     let title = if success {
         "Install complete"
     } else {
@@ -17,9 +23,7 @@ pub fn view<'a>(success: bool, error: &'a str, countdown: Option<u8>) -> Element
         .push(text::title1(title));
 
     if success {
-        body = body.push(text::body(
-            "COSMIC is installed. The system will reboot shortly.",
-        ));
+        body = body.push(text::body(branding.done_success_body.as_str()));
         if let Some(s) = countdown {
             body = body.push(text::body(format!("Rebooting in {s}s…")));
         }

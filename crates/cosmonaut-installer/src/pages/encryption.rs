@@ -1,8 +1,9 @@
-use cosmic::iced::Length;
-use cosmic::widget::{button, column, container, radio, row, text, text_input};
 use cosmic::Element;
+use cosmic::iced::Length;
+use cosmic::widget::{self, button, radio, row, scrollable, settings, text, text_input};
 
 use crate::app::Message;
+use crate::pages::wizard_frame;
 use crate::spec::EncryptionChoice;
 
 pub fn view<'a>(
@@ -17,9 +18,9 @@ pub fn view<'a>(
         EncryptionChoice::Tpm2LuksPassphrase,
     ];
 
-    let mut list = column::with_capacity(options.len()).spacing(8);
+    let mut choices = settings::section().title("Encryption mode");
     for opt in options {
-        list = list.push(radio(
+        choices = choices.add(radio(
             text::body(opt.label()),
             opt,
             Some(*choice),
@@ -27,25 +28,27 @@ pub fn view<'a>(
         ));
     }
 
-    let tpm_hint: Element<Message> = if tpm2_available == Some(false) {
-        text::caption("No TPM2 device detected; the TPM2 options will fail at install time.")
-            .into()
-    } else {
-        column::with_capacity(0).into()
-    };
+    let mut body_column = widget::column::with_capacity(3).spacing(16).push(choices);
 
-    let pass_row = if choice.needs_passphrase() {
-        column::with_capacity(2)
-            .spacing(8)
-            .push(text::body("Passphrase"))
-            .push(
-                text_input("LUKS passphrase", passphrase)
+    if tpm2_available == Some(false) {
+        body_column = body_column.push(
+            widget::container(text::caption(
+                "No TPM2 device detected; the TPM2 options will fail at install time.",
+            ))
+            .padding([0, 4]),
+        );
+    }
+
+    if choice.needs_passphrase() {
+        let pass_section = settings::section().title("Passphrase").add(
+            settings::item::builder("LUKS passphrase").control(
+                text_input("Passphrase", passphrase)
                     .password()
                     .on_input(Message::PassphraseChanged),
-            )
-    } else {
-        column::with_capacity(0)
-    };
+            ),
+        );
+        body_column = body_column.push(pass_section);
+    }
 
     let valid = !choice.needs_passphrase() || !passphrase.is_empty();
 
@@ -57,17 +60,12 @@ pub fn view<'a>(
                 .on_press_maybe(valid.then_some(Message::Next)),
         );
 
-    let body = column::with_capacity(5)
-        .spacing(20)
-        .push(text::title2("Encryption"))
-        .push(list)
-        .push(tpm_hint)
-        .push(pass_row)
-        .push(nav);
+    let body = scrollable(body_column).height(Length::Fill).width(Length::Fill);
 
-    container(body)
-        .padding(36)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    wizard_frame(
+        "Encryption",
+        Some("Pick how the target disk should be encrypted."),
+        body.into(),
+        nav.into(),
+    )
 }

@@ -5,6 +5,7 @@ members = [
     "crates/cosmonaut-installer-daemon",
     "crates/cosmonaut-installer-cli",
     "crates/cosmonaut-engine",
+    "vendor/cosmic-settings-network-manager-subscription",
 ]
 
 [workspace.package]
@@ -19,7 +20,10 @@ cosmonaut-engine = { path = "crates/cosmonaut-engine" }
 
 # libcosmic pinned to the same commit cosmic-build-meta vendors for
 # cosmic-settings et al. Sharing the rev means cargo2 in the BST sandbox
-# reuses one cached source tree across all COSMIC apps.
+# reuses one cached source tree across all COSMIC apps. The vendored
+# `cosmic-settings-network-manager-subscription` crate under vendor/ is
+# pinned against this same rev so we don't end up with two libcosmic
+# copies in the build graph.
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "c423ad1bfc25057922406c687f2ddc75ead5ab67", default-features = false, features = ["winit", "tokio", "wgpu", "single-instance"] }
 
 # Async + DBus
@@ -45,3 +49,4 @@ uuid = { version = "1", features = ["v4"] }
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
