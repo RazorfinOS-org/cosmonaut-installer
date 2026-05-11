@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "cosmonaut-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "cosmonaut-installer"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cosmic-settings-network-manager-subscription",
  "cosmonaut-engine",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "cosmonaut-installer-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "cosmonaut-installer-daemon"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cosmonaut-engine",
