@@ -1,6 +1,7 @@
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod branding;
 mod daemon;
 mod disks;
 mod images_json;

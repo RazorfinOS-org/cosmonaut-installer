@@ -1,0 +1,30 @@
+[package]
+name = "cosmic-settings-network-manager-subscription"
+version = "1.0.2"
+edition = "2024"
+license = "MPL-2.0"
+# Upstream uses `rust-version.workspace = true`; the vendored copy holds
+# it inline because we don't want to bump our workspace MSRV to 1.90 just
+# to host this crate. Let-chains used here landed in 1.88.
+rust-version = "1.88"
+publish = false
+
+# Vendored from cosmic-settings @ f48bcde63 (subscriptions/network-manager).
+# A local copy lets us pin `iced_futures` to the exact libcosmic rev our
+# workspace uses, sidestepping cargo's two-libcosmic-copies problem that
+# arises when the upstream crate's `iced_futures` dep is unpinned and
+# resolves to a HEAD that no longer exposes `Subscription::run_with_id`.
+
+[dependencies]
+cosmic-dbus-networkmanager = { git = "https://github.com/pop-os/dbus-settings-bindings" }
+secret-service = { version = "5.1.0", features = ["rt-tokio-crypto-rust"] }
+nm-secret-agent-manager = { git = "https://github.com/pop-os/dbus-settings-bindings" }
+futures = "0.3.31"
+iced_futures = { git = "https://github.com/pop-os/libcosmic", rev = "c423ad1bfc25057922406c687f2ddc75ead5ab67" }
+itertools = "0.14.0"
+secure-string = "0.3.0"
+thiserror = "2.0.17"
+tokio = "1.49.0"
+tracing = "0.1.44"
+zbus = { version = "5.12.0", features = ["tokio"] }
+bitflags = "2.10.0"

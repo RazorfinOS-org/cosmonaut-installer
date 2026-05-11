@@ -1,31 +1,41 @@
-use cosmic::iced::{Alignment, Length};
-use cosmic::widget::{button, column, container, radio, row, scrollable, text};
 use cosmic::Element;
+use cosmic::iced::Length;
+use cosmic::widget::{self, button, radio, row, scrollable, settings, text};
 
 use crate::app::Message;
+use crate::branding::Branding;
 use crate::images_json::ImageOption;
+use crate::pages::wizard_frame;
 
-pub fn view<'a>(images: &'a [ImageOption], selected: Option<usize>) -> Element<'a, Message> {
+pub fn view<'a>(
+    branding: &'a Branding,
+    images: &'a [ImageOption],
+    selected: Option<usize>,
+) -> Element<'a, Message> {
     if images.is_empty() {
-        let body = column::with_capacity(2)
-            .spacing(16)
-            .align_x(Alignment::Center)
-            .push(text::title3("No images available"))
-            .push(text::body(
-                "No /etc/cosmonaut-installer/images.json catalog found, and no fallback. \
-                 Aborting.",
-            ));
-        return container(body).padding(48).into();
+        return wizard_frame(
+            "Choose an image",
+            Some(
+                "No /etc/cosmonaut-installer/images.json catalog found. \
+                 The installer can't continue without an image to install.",
+            ),
+            widget::column::with_capacity(0).into(),
+            row::with_capacity(1)
+                .push(button::standard("Back").on_press(Message::Back))
+                .into(),
+        );
     }
 
-    let mut list = column::with_capacity(images.len()).spacing(12);
+    let mut section = settings::section().title("Available images");
     for (idx, opt) in images.iter().enumerate() {
         let label = match &opt.desc {
             Some(d) => format!("{}\n{}", opt.name, d),
             None => opt.name.clone(),
         };
-        list = list.push(radio(text::body(label), idx, selected, Message::ImageSelected));
+        section = section.add(radio(text::body(label), idx, selected, Message::ImageSelected));
     }
+
+    let body = scrollable(section).height(Length::Fill).width(Length::Fill);
 
     let nav = row::with_capacity(2)
         .spacing(12)
@@ -35,15 +45,10 @@ pub fn view<'a>(images: &'a [ImageOption], selected: Option<usize>) -> Element<'
                 .on_press_maybe(selected.map(|_| Message::Next)),
         );
 
-    let body = column::with_capacity(3)
-        .spacing(24)
-        .push(text::title2("Choose an image"))
-        .push(scrollable(list).height(Length::Fill))
-        .push(nav);
-
-    container(body)
-        .padding(36)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    wizard_frame(
+        "Choose an image",
+        Some(branding.image_description.as_str()),
+        body.into(),
+        nav.into(),
+    )
 }

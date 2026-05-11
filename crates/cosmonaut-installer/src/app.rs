@@ -1,4 +1,5 @@
 use cosmic::app::{Core, Task};
+use cosmic::iced::Subscription;
 use cosmic::{Application, ApplicationExt, Element};
 use futures_util::StreamExt;
 use tokio::sync::oneshot;
@@ -6,7 +7,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use cosmonaut_engine::Encryption;
 
-use crate::daemon::{self, DaemonEvent, WifiNetwork};
+use crate::branding::Branding;
+use crate::daemon::{self, DaemonEvent};
 use crate::disks::Disk;
 use crate::images_json::{self, Catalog, ImageOption};
 use crate::pages::{self, wifi as wifi_page, Page};
@@ -21,6 +23,13 @@ pub struct App {
     core: Core,
     page: Page,
 
+    /// Distro-overridable strings (window title, welcome copy, etc.).
+    /// Loaded synchronously at startup from `/etc/.../branding.json`
+    /// (admin override), `/usr/share/.../branding.json` (vendor default
+    /// shipped by cosmic-build-meta), or a built-in fallback. See
+    /// [`crate::branding`] for the search order.
+    branding: Branding,
+
     images: Vec<ImageOption>,
     image_idx: Option<usize>,
     catalog_loaded: bool,
@@ -33,10 +42,10 @@ pub struct App {
 
     hostname: String,
 
-    // Wifi page state
-    wifi_state: wifi_page::State,
-    wifi_idx: Option<usize>,
-    wifi_passphrase: String,
+    /// All wifi-page state, lifted into its own struct (port of CIS's
+    /// `page::wifi::Page`). Lives independently of `wifi_online` below,
+    /// which is the wired-network probe used for auto-skip.
+    wifi: wifi_page::WifiUiState,
     /// Result of the daemon's is_online probe at startup.
     /// `None` = not probed yet (default to showing the page),
     /// `Some(true)` = wired/online (auto-skip the page),
@@ -83,13 +92,11 @@ pub enum Message {
 
     // Wifi page
     WifiOnlineProbed(Result<bool, String>),
-    WifiRescan,
-    WifiScanResult(Result<Vec<WifiNetwork>, String>),
-    WifiSelected(usize),
-    WifiPassphraseChanged(String),
     WifiSkip,
-    WifiConnect,
-    WifiConnectResult(Result<(), String>),
+    /// All wifi-page interactions are namespaced under this variant so
+    /// `App::update`'s match stays manageable. Defined in
+    /// `pages::wifi::WifiMsg`.
+    Wifi(wifi_page::WifiMsg),
 
     // Confirm action
     StartInstall,
@@ -119,9 +126,12 @@ impl Application for App {
     }
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
+        let branding = Branding::load();
+        let title = branding.installer_title.clone();
         let mut app = Self {
             core,
             page: Page::Welcome,
+            branding,
             images: Vec::new(),
             image_idx: None,
             catalog_loaded: false,
@@ -138,13 +148,11 @@ impl Application for App {
             install_success: false,
             install_error: String::new(),
             reboot_countdown: None,
-            wifi_state: wifi_page::State::Idle,
-            wifi_idx: None,
-            wifi_passphrase: String::new(),
+            wifi: wifi_page::WifiUiState::default(),
             wifi_online: None,
             tpm2_available: None,
         };
-        let title_task = app.set_window_title("COSMIC Installer".into());
+        let title_task = app.set_window_title(title);
 
         // Kick off async loads in parallel: image catalog + disk list +
         // is_online probe (so we can auto-skip the wifi page if wired
@@ -280,54 +288,11 @@ impl Application for App {
                 self.tpm2_available = Some(false);
                 Task::none()
             }
-            Message::WifiRescan => {
-                self.wifi_state = wifi_page::State::Scanning;
-                self.wifi_idx = None;
-                wifi_scan_task()
-            }
-            Message::WifiScanResult(Ok(nets)) => {
-                self.wifi_state = wifi_page::State::Networks(nets);
-                Task::none()
-            }
-            Message::WifiScanResult(Err(e)) => {
-                self.wifi_state = wifi_page::State::Error(e);
-                Task::none()
-            }
-            Message::WifiSelected(i) => {
-                self.wifi_idx = Some(i);
-                Task::none()
-            }
-            Message::WifiPassphraseChanged(p) => {
-                self.wifi_passphrase = p;
-                Task::none()
-            }
             Message::WifiSkip => {
                 self.page = page_after_wifi();
                 Task::none()
             }
-            Message::WifiConnect => {
-                let Some(i) = self.wifi_idx else {
-                    return Task::none();
-                };
-                let Some(net) = wifi_state_networks(&self.wifi_state).and_then(|n| n.get(i)) else {
-                    return Task::none();
-                };
-                let ssid = net.ssid.clone();
-                let psk = self.wifi_passphrase.clone();
-                self.wifi_state = wifi_page::State::Connecting { ssid: ssid.clone() };
-                Task::perform(daemon::connect_wifi(ssid, psk), |r| {
-                    cosmic::Action::App(Message::WifiConnectResult(r))
-                })
-            }
-            Message::WifiConnectResult(Ok(())) => {
-                self.wifi_online = Some(true);
-                self.page = page_after_wifi();
-                Task::none()
-            }
-            Message::WifiConnectResult(Err(e)) => {
-                self.wifi_state = wifi_page::State::Error(e);
-                Task::none()
-            }
+            Message::Wifi(msg) => self.wifi.update(msg),
 
             Message::StartInstall => {
                 let Some(spec) = self.build_final_spec() else {
@@ -416,11 +381,9 @@ impl Application for App {
 
     fn view(&self) -> Element<'_, Self::Message> {
         match self.page {
-            Page::Welcome => pages::welcome::view(),
-            Page::Image => pages::image::view(&self.images, self.image_idx),
-            Page::Wifi => {
-                pages::wifi::view(&self.wifi_state, self.wifi_idx, &self.wifi_passphrase)
-            }
+            Page::Welcome => pages::welcome::view(&self.branding),
+            Page::Image => pages::image::view(&self.branding, &self.images, self.image_idx),
+            Page::Wifi => pages::wifi::view(&self.wifi, Message::WifiSkip, Message::Back),
             Page::Disk => pages::disk::view(&self.disks, self.disk_idx),
             Page::Encryption => pages::encryption::view(
                 &self.encryption_choice,
@@ -439,29 +402,43 @@ impl Application for App {
                 self.install_in_flight && self.cancellable_now(),
             ),
             Page::Done => pages::done::view(
+                &self.branding,
                 self.install_success,
                 &self.install_error,
                 self.reboot_countdown,
             ),
         }
     }
+
+    /// Surface the wifi page's auth/forget dialogs (port of CIS's
+    /// per-page `dialog()` method). Other pages don't have dialogs yet,
+    /// so this fans out only when we're actually on the Wifi page.
+    fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        match self.page {
+            Page::Wifi => pages::wifi::dialog(&self.wifi),
+            _ => None,
+        }
+    }
+
+    /// Keep the NetworkManager stream running for the whole app lifetime
+    /// so the wifi page's state is already warm by the time the user
+    /// reaches it (and so wired→online flips show up even if the page is
+    /// auto-skipped).
+    fn subscription(&self) -> Subscription<Self::Message> {
+        pages::wifi::subscription()
+    }
 }
 
 impl App {
     /// Side-effect for transitioning into a new page (called from
-    /// `Message::Next`'s handler, *after* `next_page` resolved). Used
-    /// by the wifi page to kick off the initial scan on first entry.
+    /// `Message::Next`'s handler, *after* `next_page` resolved). The
+    /// wifi page uses this hook to spawn its NM secret agent on first
+    /// entry; the NM event stream itself runs from `subscription()` so
+    /// the access-point list is already populated by the time we get
+    /// here.
     fn on_page_entered(&mut self, _from: Page) -> Task<Message> {
         match self.page {
-            Page::Wifi => {
-                // Re-scan only if we've never scanned (Idle), to avoid
-                // wiping the user's selection if they hit Back/Next.
-                if matches!(self.wifi_state, wifi_page::State::Idle) {
-                    self.wifi_state = wifi_page::State::Scanning;
-                    return wifi_scan_task();
-                }
-                Task::none()
-            }
+            Page::Wifi => self.wifi.on_first_enter(),
             _ => Task::none(),
         }
     }
@@ -541,20 +518,6 @@ fn back_page(current: Page) -> Page {
 
 fn page_after_wifi() -> Page {
     Page::Disk
-}
-
-fn wifi_state_networks(state: &wifi_page::State) -> Option<&[WifiNetwork]> {
-    if let wifi_page::State::Networks(n) = state {
-        Some(n)
-    } else {
-        None
-    }
-}
-
-fn wifi_scan_task() -> Task<Message> {
-    Task::perform(daemon::scan_wifi(), |r| {
-        cosmic::Action::App(Message::WifiScanResult(r))
-    })
 }
 
 fn push_log(log: &mut String, stream: &str, line: &str) {
