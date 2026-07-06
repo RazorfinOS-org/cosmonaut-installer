@@ -1,0 +1,66 @@
+name: QEMU E2E
+
+# Nightly full-install matrix. Not per-PR: each row boots a multi-GB
+# live ISO in QEMU, installs, and boots the result (~15 min/row).
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+    inputs:
+      iso_run_id:
+        description: cosmic-build-meta workflow run id to fetch the ISO from (default: latest)
+        required: false
+
+env:
+  # Repo that publishes the live-ISO artifact. Flagged in
+  # docs/install-pipeline.md: cosmic-build-meta must upload its ISO as a
+  # workflow artifact named `live-iso` for this to work.
+  ISO_REPO: RazorfinOS-org/cosmic-build-meta
+  ISO_ARTIFACT: live-iso
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [none, luks-passphrase, tpm2-luks, tpm2-luks-passphrase]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf swtpm socat
+          # KVM access for the runner user.
+          sudo chmod 666 /dev/kvm || true
+
+      - name: Fetch latest live ISO artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build/e2e
+          RUN_ID="${{ github.event.inputs.iso_run_id }}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh run list --repo "$ISO_REPO" --status success \
+              --json databaseId,workflowName \
+              --jq '[.[] | select(.workflowName | test("iso"; "i"))][0].databaseId')
+          fi
+          test -n "$RUN_ID" || { echo "no ISO-producing run found in $ISO_REPO"; exit 1; }
+          gh run download "$RUN_ID" --repo "$ISO_REPO" --name "$ISO_ARTIFACT" --dir build/e2e
+          # Artifact may contain the iso under any name; normalize.
+          found=$(find build/e2e -name '*.iso' | head -1)
+          test -n "$found" || { echo "artifact had no .iso"; exit 1; }
+          mv "$found" build/e2e/live.iso
+          ls -lh build/e2e/live.iso
+
+      - name: Run E2E (${{ matrix.variant }})
+        # VM_MEM caveat: the engine's skopeo scratch lives on tmpfs, so
+        # the VM needs RAM > compressed image size. ubuntu-latest has
+        # 16 GB total — enough for the plain `cosmic` image, NOT for the
+        # ~16 GB nvidia one. Use the plain-image ISO here, or move this
+        # job to a larger runner.
+        run: |
+          OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd VM_MEM=12288 \
+            tests/e2e/run-e2e.sh "${{ matrix.variant }}" build/e2e/live.iso

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (libcosmic build inputs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libinput-dev libudev-dev \
+            libssl-dev pkg-config just
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+        # The vendored NM-subscription crate predates our fmt config;
+        # don't let it block. First-party crates must stay clean.
+        continue-on-error: true
+
+      - name: clippy (first-party crates)
+        run: |
+          cargo clippy -p cosmonaut-engine -p cosmonaut-installer-daemon \
+            -p cosmonaut-installer-cli -- -D warnings
+
+      - name: unit tests
+        run: cargo test --workspace
+
+  loopback:
+    name: engine loopback tests (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools used by the engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            util-linux dosfstools e2fsprogs btrfs-progs cryptsetup-bin
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: loopback suite
+        run: |
+          cargo build -p cosmonaut-engine --tests
+          sudo -E env "PATH=$PATH" \
+            cargo test -p cosmonaut-engine --test loopback -- --ignored --test-threads=1

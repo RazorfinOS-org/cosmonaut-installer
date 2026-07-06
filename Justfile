@@ -42,6 +42,25 @@ install:
 check:
     cargo check --workspace --all-targets
 
+# Pure unit tests (no root, no block devices).
+test:
+    cargo test --workspace
+
+# Loopback-device integration tests for the partition/format layers.
+# Needs root: losetup, sfdisk, mkfs.*, mount against loop devices.
+# Compiles as the invoking user (root under sudo would re-download its
+# own toolchain and inherit RUSTC_WRAPPER), then sudo-runs only the
+# test executable.
+test-engine:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER_OVERRIDE:-}"
+    BIN=$(cargo test -p cosmonaut-engine --test loopback --no-run --message-format=json \
+        | grep -o '"executable":"[^"]*loopback[^"]*"' | cut -d'"' -f4 | head -1)
+    test -n "$BIN" || { echo "loopback test binary not found"; exit 1; }
+    echo "==> sudo $BIN --ignored --test-threads=1"
+    sudo "$BIN" --ignored --test-threads=1
+
 fmt:
     cargo fmt --all
 
