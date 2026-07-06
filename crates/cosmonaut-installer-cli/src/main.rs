@@ -1,14 +1,16 @@
 //! cosmonaut-installer-cli — headless driver for the cosmonaut DBus
-//! daemon. Builds an `(disk, image, hostname, enc_type, enc_arg)` spec
-//! from CLI args and calls `Install()` on the system bus, streaming
-//! `StepChanged` and `LogLine` signals to stdout.
+//! daemon. Builds a `cosmonaut_engine::InstallSpec` from CLI args and
+//! calls `InstallJson()` on the system bus, streaming `StepChanged`
+//! and `LogLine` signals to stdout.
 //!
 //! Powers the QEMU-based PR gate — same install path as the GUI but
 //! scriptable.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use cosmonaut_engine::{Encryption, InstallSpec, PartitionPlan};
 use futures_util::StreamExt;
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use zbus::proxy;
 
@@ -39,6 +41,12 @@ struct Args {
     /// TPM2 LUKS with a recovery passphrase. Mutually exclusive.
     #[arg(long, conflicts_with_all = ["luks_passphrase", "tpm2_luks"])]
     tpm2_luks_passphrase: Option<String>,
+
+    /// Partition plan as JSON (serde form of `PartitionPlan`), e.g.
+    /// `{"mode":"free-space","gap_start_bytes":...,"gap_size_bytes":...}`.
+    /// Defaults to erase-disk.
+    #[arg(long)]
+    plan_json: Option<String>,
 }
 
 #[proxy(
@@ -47,14 +55,7 @@ struct Args {
     default_path = "/dev/cosmonaut/Installer1"
 )]
 trait Installer {
-    async fn install(
-        &self,
-        disk: &str,
-        image: &str,
-        hostname: &str,
-        enc_type: &str,
-        enc_arg: &str,
-    ) -> zbus::Result<()>;
+    async fn install_json(&self, spec_json: &str) -> zbus::Result<()>;
 
     async fn cancel(&self) -> zbus::Result<bool>;
 
@@ -71,6 +72,9 @@ trait Installer {
     fn log_line(&self, stream: &str, line: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
+    fn progress(&self, percent: u8, step: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
     fn completed(&self, success: bool, error: &str) -> zbus::Result<()>;
 }
 
@@ -84,7 +88,19 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let (enc_type, enc_arg) = derive_encryption(&args)?;
+    let encryption = derive_encryption(&args)?;
+    let plan: PartitionPlan = match &args.plan_json {
+        Some(json) => serde_json::from_str(json).context("parsing --plan-json")?,
+        None => PartitionPlan::EraseDisk,
+    };
+    let spec = InstallSpec {
+        disk: PathBuf::from(&args.disk),
+        image: args.image.clone(),
+        hostname: args.hostname.clone(),
+        encryption,
+        plan,
+    };
+    let spec_json = serde_json::to_string(&spec).context("serializing spec")?;
 
     let conn = zbus::Connection::system()
         .await
@@ -97,6 +113,7 @@ async fn main() -> Result<()> {
     // first StepChanged.
     let mut step_stream = proxy.receive_step_changed().await?;
     let mut log_stream = proxy.receive_log_line().await?;
+    let mut progress_stream = proxy.receive_progress().await?;
     let mut completed_stream = proxy.receive_completed().await?;
 
     let signals_done = tokio::sync::Notify::new();
@@ -120,6 +137,13 @@ async fn main() -> Result<()> {
             }
         }
     });
+    let progress_printer = tokio::spawn(async move {
+        while let Some(sig) = progress_stream.next().await {
+            if let Ok(args) = sig.args() {
+                eprintln!("== progress: {}% ({})", args.percent, args.step);
+            }
+        }
+    });
     let completed_watcher = tokio::spawn(async move {
         if let Some(sig) = completed_stream.next().await {
             if let Ok(args) = sig.args() {
@@ -132,15 +156,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    eprintln!("== calling Install on dev.cosmonaut.Installer1 ==");
-    let result = proxy
-        .install(&args.disk, &args.image, &args.hostname, &enc_type, &enc_arg)
-        .await;
+    eprintln!("== calling InstallJson on dev.cosmonaut.Installer1 ==");
+    let result = proxy.install_json(&spec_json).await;
 
     // Wait briefly for any in-flight signals to drain.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), completed_watcher).await;
     step_printer.abort();
     log_printer.abort();
+    progress_printer.abort();
 
     match result {
         Ok(()) => {
@@ -154,21 +177,25 @@ async fn main() -> Result<()> {
     }
 }
 
-fn derive_encryption(args: &Args) -> Result<(String, String)> {
+fn derive_encryption(args: &Args) -> Result<Encryption> {
     if let Some(p) = &args.luks_passphrase {
         if p.is_empty() {
             bail!("--luks-passphrase must be non-empty");
         }
-        return Ok(("luks-passphrase".into(), p.clone()));
+        return Ok(Encryption::LuksPassphrase {
+            passphrase: p.clone(),
+        });
     }
     if args.tpm2_luks {
-        return Ok(("tpm2-luks".into(), String::new()));
+        return Ok(Encryption::Tpm2Luks);
     }
     if let Some(p) = &args.tpm2_luks_passphrase {
         if p.is_empty() {
             bail!("--tpm2-luks-passphrase must be non-empty");
         }
-        return Ok(("tpm2-luks-passphrase".into(), p.clone()));
+        return Ok(Encryption::Tpm2LuksPassphrase {
+            passphrase: p.clone(),
+        });
     }
-    Ok(("none".into(), String::new()))
+    Ok(Encryption::None)
 }

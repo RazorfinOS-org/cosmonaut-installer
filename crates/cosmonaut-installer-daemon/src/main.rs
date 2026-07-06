@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing_subscriber::EnvFilter;
 
+mod probe;
 mod service;
 mod wifi;
 

@@ -2,10 +2,9 @@
 //! method (blocking — returns when the install finishes), a `Cancel`
 //! method, two read-only properties, and three signals.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use cosmonaut_engine::{install, Encryption, Event, InstallSpec, Step};
+use cosmonaut_engine::{install, Event, InstallSpec, Step};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use zbus::object_server::SignalEmitter;
@@ -72,38 +71,25 @@ impl Installer {
     /// errors out, or is cancelled. Progress is delivered out-of-band via
     /// the `StepChanged` and `LogLine` signals.
     ///
-    /// Wire format (kept flat for DBus simplicity):
-    /// - `disk`        — `/dev/...`
-    /// - `image`       — OCI ref
-    /// - `hostname`    — string written into `/etc/hostname`
-    /// - `enc_type`    — one of "none", "luks-passphrase", "tpm2-luks", "tpm2-luks-passphrase"
-    /// - `enc_arg`     — passphrase (for the passphrase variants), else empty
-    async fn install(
+    /// `spec_json` is a serde-serialized [`cosmonaut_engine::InstallSpec`]
+    /// — one argument instead of an ever-growing flat tuple. The engine
+    /// crate is the single schema owner; GUI and CLI serialize the same
+    /// type. The engine re-validates everything (including the partition
+    /// plan against a fresh disk probe), so a malformed or stale spec
+    /// fails safely.
+    async fn install_json(
         &self,
-        disk: String,
-        image: String,
-        hostname: String,
-        enc_type: String,
-        enc_arg: String,
+        spec_json: String,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
-        // Build the typed spec from the flat wire form.
-        let encryption = parse_encryption(&enc_type, &enc_arg)
-            .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
-        let spec = InstallSpec {
-            disk: PathBuf::from(disk),
-            image,
-            hostname,
-            encryption,
-        };
+        let spec: InstallSpec = serde_json::from_str(&spec_json)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("bad spec JSON: {e}")))?;
 
         // Reject overlapping installs.
         {
             let mut inner = self.inner.lock().await;
             if inner.state == RunState::Running {
-                return Err(fdo::Error::Failed(
-                    "install already in progress".into(),
-                ));
+                return Err(fdo::Error::Failed("install already in progress".into()));
             }
             inner.state = RunState::Running;
             inner.current_step = None;
@@ -142,7 +128,14 @@ impl Installer {
                     let _ = Self::step_changed(&emitter, step.as_str(), &detail).await;
                 }
                 Event::Log { stream, line } => {
+                    // Mirror every subprocess line into the daemon's own log
+                    // (journald via the unit's Standard{Output,Error}=journal),
+                    // so failure context survives after the GUI goes away.
+                    tracing::info!(target: "engine", stream = stream.as_str(), "{line}");
                     let _ = Self::log_line(&emitter, stream.as_str(), &line).await;
+                }
+                Event::Progress { percent, step } => {
+                    let _ = Self::progress(&emitter, percent, step.as_str()).await;
                 }
             }
         }
@@ -172,9 +165,9 @@ impl Installer {
 
         match result {
             Ok(()) => Ok(()),
-            Err(cosmonaut_engine::EngineError::Cancelled) => Err(fdo::Error::Failed(
-                "install cancelled by Cancel()".into(),
-            )),
+            Err(cosmonaut_engine::EngineError::Cancelled) => {
+                Err(fdo::Error::Failed("install cancelled by Cancel()".into()))
+            }
             Err(e) => Err(fdo::Error::Failed(e.to_string())),
         }
     }
@@ -207,6 +200,25 @@ impl Installer {
             .map(Step::as_str)
             .unwrap_or("")
             .to_owned()
+    }
+
+    /// Probe all whole disks: partitions, free-space gaps, and detected
+    /// operating systems (root-only: OS detection ro-mounts candidate
+    /// filesystems). Returns JSON `Vec<cosmonaut_engine::probe::DiskInfo>`.
+    /// Refused while an install is running — the probe mounts things.
+    async fn probe_disks(&self) -> fdo::Result<String> {
+        {
+            let inner = self.inner.lock().await;
+            if inner.state == RunState::Running {
+                return Err(fdo::Error::Failed(
+                    "install in progress; probe refused".into(),
+                ));
+            }
+        }
+        let disks = crate::probe::probe_disks_with_os()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("probe: {e}")))?;
+        serde_json::to_string(&disks).map_err(|e| fdo::Error::Failed(format!("serialize: {e}")))
     }
 
     /// Detect a default IPv4 route so the wizard can auto-skip the
@@ -256,35 +268,19 @@ impl Installer {
     }
 
     #[zbus(signal)]
-    async fn step_changed(emitter: &SignalEmitter<'_>, step: &str, detail: &str) -> zbus::Result<()>;
+    async fn step_changed(
+        emitter: &SignalEmitter<'_>,
+        step: &str,
+        detail: &str,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn log_line(emitter: &SignalEmitter<'_>, stream: &str, line: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn completed(emitter: &SignalEmitter<'_>, success: bool, error: &str) -> zbus::Result<()>;
-}
+    async fn progress(emitter: &SignalEmitter<'_>, percent: u8, step: &str) -> zbus::Result<()>;
 
-fn parse_encryption(t: &str, arg: &str) -> anyhow::Result<Encryption> {
-    Ok(match t {
-        "none" => Encryption::None,
-        "luks-passphrase" => {
-            if arg.is_empty() {
-                anyhow::bail!("luks-passphrase requires a non-empty passphrase");
-            }
-            Encryption::LuksPassphrase {
-                passphrase: arg.to_owned(),
-            }
-        }
-        "tpm2-luks" => Encryption::Tpm2Luks,
-        "tpm2-luks-passphrase" => {
-            if arg.is_empty() {
-                anyhow::bail!("tpm2-luks-passphrase requires a non-empty passphrase");
-            }
-            Encryption::Tpm2LuksPassphrase {
-                passphrase: arg.to_owned(),
-            }
-        }
-        other => anyhow::bail!("unknown encryption type: {other}"),
-    })
+    #[zbus(signal)]
+    async fn completed(emitter: &SignalEmitter<'_>, success: bool, error: &str)
+        -> zbus::Result<()>;
 }

@@ -69,7 +69,7 @@ pub async fn first_wireless_device() -> Result<Option<String>> {
     for line in out.lines() {
         // iwctl device list rows look like:
         //   wlan0    phy0    station    on
-        let trimmed = line.trim_start_matches(|c: char| c == ' ' || c == '>');
+        let trimmed = line.trim_start_matches([' ', '>']);
         let toks: Vec<&str> = trimmed.split_whitespace().collect();
         if toks.len() >= 4 && toks[3] == "on" && toks[0].starts_with("wl") {
             return Ok(Some(toks[0].to_owned()));
@@ -169,7 +169,7 @@ fn parse_networks(stdout: &str) -> Vec<WifiNetwork> {
         }
         let connected = line.trim_start().starts_with('>');
         let body = line
-            .trim_start_matches(|c: char| c == ' ' || c == '>')
+            .trim_start_matches([' ', '>'])
             .trim();
         if body.is_empty() {
             continue;
