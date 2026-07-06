@@ -14,18 +14,18 @@ use std::{
 };
 
 use cosmic::{
-    Apply, Element,
     app::Task,
-    iced::{Alignment, Length},
     iced::core::text::Wrapping,
     iced::runtime::widget::operation::focus_next,
+    iced::{Alignment, Length},
     widget::{self, icon},
+    Apply, Element,
 };
 use cosmic_settings_network_manager_subscription::{
-    self as network_manager, NetworkManagerState,
+    self as network_manager,
     available_wifi::{AccessPoint, NetworkType},
     current_networks::ActiveConnectionInfo,
-    nm_secret_agent,
+    nm_secret_agent, NetworkManagerState,
 };
 use eyre::Context;
 use futures::{SinkExt, StreamExt};
@@ -41,8 +41,7 @@ pub static SECURE_INPUT_WIFI: LazyLock<widget::Id> = LazyLock::new(widget::Id::u
 /// DBus well-known name we register our NetworkManager secret agent under.
 /// Picking a name in our own reverse-DNS space avoids stomping on
 /// cosmic-settings' secret agent if both ever run in the same session.
-const SECRET_AGENT_BUS_NAME: &str =
-    "dev.cosmonaut.Installer.NetworkManager.SecretAgent";
+const SECRET_AGENT_BUS_NAME: &str = "dev.cosmonaut.Installer.NetworkManager.SecretAgent";
 
 /// All wifi-page state, lifted out of `App` to keep its field count sane.
 #[derive(Debug, Default)]
@@ -334,8 +333,7 @@ impl WifiUiState {
                         self.connecting.insert(ssid.clone());
                         let nm_sender = nm.sender.clone();
                         let secret_tx = self.secret_tx.clone();
-                        let interface =
-                            self.active_device.as_ref().map(|d| d.interface.clone());
+                        let interface = self.active_device.as_ref().map(|d| d.interface.clone());
                         // Fire-and-forget: the work is just a couple of
                         // channel sends — no need to integrate with iced's
                         // task runtime (which would require shaping the
@@ -553,8 +551,7 @@ impl WifiUiState {
     }
 }
 
-const WIFI_DESCRIPTION: &str =
-    "Pick a wireless network to connect to before installing. \
+const WIFI_DESCRIPTION: &str = "Pick a wireless network to connect to before installing. \
      You can skip and connect later if a wired network is already up.";
 
 pub fn view(ui: &WifiUiState, on_skip: AppMessage, on_back: AppMessage) -> Element<'_, AppMessage> {
@@ -568,12 +565,11 @@ pub fn view(ui: &WifiUiState, on_skip: AppMessage, on_back: AppMessage) -> Eleme
         return crate::pages::wizard_frame(
             "Wifi",
             Some(WIFI_DESCRIPTION),
-            widget::container(widget::text::body(
-                "Connecting to NetworkManager\u{2026}",
-            ))
-            .center_x(Length::Fill)
-            .into(),
+            widget::container(widget::text::body("Connecting to NetworkManager\u{2026}"))
+                .center_x(Length::Fill)
+                .into(),
             nav,
+            crate::pages::Page::Wifi,
         );
     };
 
@@ -651,8 +647,7 @@ pub fn view(ui: &WifiUiState, on_skip: AppMessage, on_back: AppMessage) -> Eleme
                 let identifier = widget::row::with_capacity(3)
                     .push(widget::icon::from_name(wifi_icon(network.strength)))
                     .push_maybe(
-                        is_encrypted
-                            .then(|| widget::icon::from_name("connection-secure-symbolic")),
+                        is_encrypted.then(|| widget::icon::from_name("connection-secure-symbolic")),
                     )
                     .push(widget::text::body(network.ssid.as_ref()).wrapping(Wrapping::Glyph))
                     .spacing(spacing.space_xxs);
@@ -748,7 +743,13 @@ pub fn view(ui: &WifiUiState, on_skip: AppMessage, on_back: AppMessage) -> Eleme
         .apply(Element::from)
         .map(AppMessage::Wifi);
 
-    crate::pages::wizard_frame("Wifi", Some(WIFI_DESCRIPTION), body, nav)
+    crate::pages::wizard_frame(
+        "Wifi",
+        Some(WIFI_DESCRIPTION),
+        body,
+        nav,
+        crate::pages::Page::Wifi,
+    )
 }
 
 pub fn dialog(ui: &WifiUiState) -> Option<Element<'_, AppMessage>> {
@@ -769,8 +770,8 @@ pub fn dialog(ui: &WifiUiState) -> Option<Element<'_, AppMessage>> {
             .on_input(|input| WifiMsg::PasswordUpdate(SecureString::from(input)).into())
             .on_submit(|_| WifiMsg::ConnectWithPassword.into());
 
-            let primary_action = widget::button::suggested("Connect")
-                .on_press(WifiMsg::ConnectWithPassword.into());
+            let primary_action =
+                widget::button::suggested("Connect").on_press(WifiMsg::ConnectWithPassword.into());
 
             let secondary_action =
                 widget::button::standard("Cancel").on_press(WifiMsg::CancelDialog.into());
@@ -824,36 +825,39 @@ pub fn subscription() -> cosmic::iced::Subscription<AppMessage> {
 }
 
 fn network_manager_stream() -> impl futures::Stream<Item = AppMessage> {
-    cosmic::iced::stream::channel::<AppMessage>(1, |mut output: futures::channel::mpsc::Sender<AppMessage>| async move {
-        let conn = match zbus::Connection::system().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(?e, "wifi: failed to connect to system bus");
-                return;
-            }
-        };
+    cosmic::iced::stream::channel::<AppMessage>(
+        1,
+        |mut output: futures::channel::mpsc::Sender<AppMessage>| async move {
+            let conn = match zbus::Connection::system().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(?e, "wifi: failed to connect to system bus");
+                    return;
+                }
+            };
 
-        let (tx, mut rx) = futures::channel::mpsc::channel(1);
+            let (tx, mut rx) = futures::channel::mpsc::channel(1);
 
-        let watchers = std::pin::pin!(async move {
-            futures::join!(
-                network_manager::watch(conn.clone(), tx.clone()),
-                network_manager::active_conns::watch(conn.clone(), tx.clone()),
-                network_manager::wireless_enabled::watch(conn.clone(), tx.clone()),
-                network_manager::watch_connections_changed(conn, tx)
-            );
-        });
+            let watchers = std::pin::pin!(async move {
+                futures::join!(
+                    network_manager::watch(conn.clone(), tx.clone()),
+                    network_manager::active_conns::watch(conn.clone(), tx.clone()),
+                    network_manager::wireless_enabled::watch(conn.clone(), tx.clone()),
+                    network_manager::watch_connections_changed(conn, tx)
+                );
+            });
 
-        let forwarder = std::pin::pin!(async move {
-            while let Some(message) = rx.next().await {
-                _ = output
-                    .send(AppMessage::Wifi(WifiMsg::NetworkManager(message)))
-                    .await;
-            }
-        });
+            let forwarder = std::pin::pin!(async move {
+                while let Some(message) = rx.next().await {
+                    _ = output
+                        .send(AppMessage::Wifi(WifiMsg::NetworkManager(message)))
+                        .await;
+                }
+            });
 
-        futures::future::select(watchers, forwarder).await;
-    })
+            futures::future::select(watchers, forwarder).await;
+        },
+    )
 }
 
 fn is_connected(state: &NetworkManagerState, network: &AccessPoint) -> bool {

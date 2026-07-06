@@ -1,78 +1,49 @@
-//! Disk enumeration via `lsblk -ndo NAME,SIZE,MODEL,TYPE`.
+//! Disk enumeration for the wizard, built on `cosmonaut_engine::probe`
+//! (lsblk JSON + sfdisk sector layout).
 //!
-//! UDisks2 over zbus would be more idiomatic but pulls in a substantial
-//! dep tree; lsblk is one subprocess and zero new crates. Phase 1+
-//! upgrade is a non-event when we want hot-plug awareness.
+//! Running unprivileged (host-side dev runs), sfdisk can't read raw
+//! devices, so partition starts/gaps may be missing — the probe
+//! degrades gracefully. In the live env the GUI runs as the live user
+//! which can read block devices; Phase 3 moves probing into the root
+//! daemon (adding OS detection) with this as the fallback.
 
-use std::path::PathBuf;
-use std::process::Command;
+use cosmonaut_engine::probe::{self, human_size};
 
-#[derive(Debug, Clone)]
-pub struct Disk {
-    pub path: PathBuf,
-    pub size: String,
-    pub model: String,
+pub use cosmonaut_engine::probe::DiskInfo as Disk;
+
+/// Display helpers for probe types, kept GUI-side so the engine stays
+/// presentation-free.
+pub trait DiskExt {
+    fn label(&self) -> String;
 }
 
-impl Disk {
-    pub fn label(&self) -> String {
-        let model = self.model.trim();
-        if model.is_empty() {
-            format!("{}  ({})", self.path.display(), self.size)
+impl DiskExt for Disk {
+    fn label(&self) -> String {
+        let size = human_size(self.size_bytes);
+        if self.model.is_empty() {
+            format!("{}  ({size})", self.path.display())
         } else {
-            format!("{}  ({}, {})", self.path.display(), self.size, model)
+            format!("{}  ({size}, {})", self.path.display(), self.model)
         }
     }
 }
 
-/// Run lsblk and return the disks (TYPE=disk only). Block on the
-/// subprocess — the call site is run on a background tokio task.
-pub fn list_blocking() -> std::io::Result<Vec<Disk>> {
-    let out = Command::new("lsblk")
-        .args([
-            "-ndo",
-            "NAME,SIZE,MODEL,TYPE",
-            "--paths",
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(format!(
-            "lsblk exited with {}",
-            out.status
-        )));
-    }
+/// Probe all whole disks. Blocking — call from `spawn_blocking`.
+pub fn list_blocking() -> anyhow::Result<Vec<Disk>> {
+    probe::probe_disks_blocking()
+}
 
-    let mut disks = Vec::new();
-    for line in std::str::from_utf8(&out.stdout)
-        .unwrap_or("")
-        .lines()
-    {
-        let mut parts = line.split_whitespace();
-        let name = parts.next();
-        let size = parts.next();
-        // model may have spaces; type is always last single token.
-        let rest: Vec<&str> = parts.collect();
-        if rest.is_empty() {
-            continue;
+/// Daemon probe (root: gap math + OS detection) with a local
+/// unprivileged fallback for host-side dev runs without the daemon.
+pub async fn probe_with_fallback() -> Result<Vec<Disk>, String> {
+    match crate::daemon::probe_disks().await {
+        Ok(disks) => Ok(disks),
+        Err(e) => {
+            tracing::warn!(error = %e, "daemon probe unavailable; falling back to local lsblk");
+            tokio::task::spawn_blocking(list_blocking)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
         }
-        let last = *rest.last().unwrap();
-        if last != "disk" {
-            continue;
-        }
-        let model = if rest.len() > 1 {
-            rest[..rest.len() - 1].join(" ")
-        } else {
-            String::new()
-        };
-
-        let (Some(name), Some(size)) = (name, size) else {
-            continue;
-        };
-        disks.push(Disk {
-            path: PathBuf::from(name),
-            size: size.to_owned(),
-            model,
-        });
     }
-    Ok(disks)
 }

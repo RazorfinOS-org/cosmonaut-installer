@@ -12,16 +12,12 @@ use zbus::proxy;
     default_path = "/dev/cosmonaut/Installer1"
 )]
 trait Installer {
-    async fn install(
-        &self,
-        disk: &str,
-        image: &str,
-        hostname: &str,
-        enc_type: &str,
-        enc_arg: &str,
-    ) -> zbus::Result<()>;
+    /// `spec_json` is a serde-serialized `cosmonaut_engine::InstallSpec`.
+    async fn install_json(&self, spec_json: &str) -> zbus::Result<()>;
 
     async fn cancel(&self) -> zbus::Result<bool>;
+
+    async fn probe_disks(&self) -> zbus::Result<String>;
 
     async fn is_online(&self) -> zbus::Result<bool>;
 
@@ -36,6 +32,9 @@ trait Installer {
 
     #[zbus(signal)]
     fn log_line(&self, stream: &str, line: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn progress(&self, percent: u8, step: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn completed(&self, success: bool, error: &str) -> zbus::Result<()>;
@@ -63,6 +62,23 @@ pub async fn is_online() -> Result<bool, String> {
         .is_online()
         .await
         .map_err(|e| format!("is_online: {e}"))
+}
+
+/// Root-side disk probe: partitions + gaps + detected OSes. Errors
+/// (daemon unreachable, e.g. host-side dev runs) make the caller fall
+/// back to the local unprivileged probe.
+pub async fn probe_disks() -> Result<Vec<cosmonaut_engine::probe::DiskInfo>, String> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    let proxy = InstallerProxy::new(&conn)
+        .await
+        .map_err(|e| format!("proxy: {e}"))?;
+    let json = proxy
+        .probe_disks()
+        .await
+        .map_err(|e| format!("probe_disks: {e}"))?;
+    serde_json::from_str(&json).map_err(|e| format!("probe_disks parse: {e}"))
 }
 
 /// Probe whether the host has a TPM2 device. Errors (DBus unreachable,
@@ -121,9 +137,21 @@ pub async fn connect_wifi(ssid: String, passphrase: String) -> Result<(), String
 /// Events forwarded from DBus signals to the GUI's `update()` loop.
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
-    Step { step: String, detail: String },
-    Log { stream: String, line: String },
-    Completed { success: bool, error: String },
+    Step {
+        step: String,
+        detail: String,
+    },
+    Log {
+        stream: String,
+        line: String,
+    },
+    Progress {
+        percent: u8,
+    },
+    Completed {
+        success: bool,
+        error: String,
+    },
     /// Connection-level error (couldn't reach the daemon, name owner died, etc.)
     ConnectionError(String),
 }
@@ -134,15 +162,20 @@ pub enum DaemonEvent {
 /// `cancel_rx` lets the GUI request cancellation; we forward to the
 /// daemon's `Cancel()` method when it fires.
 pub fn spawn_install(
-    disk: String,
-    image: String,
-    hostname: String,
-    enc_type: String,
-    enc_arg: String,
+    spec: cosmonaut_engine::InstallSpec,
     tx: mpsc::UnboundedSender<DaemonEvent>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
+        let spec_json = match serde_json::to_string(&spec) {
+            Ok(j) => j,
+            Err(e) => {
+                let _ = tx.send(DaemonEvent::ConnectionError(format!(
+                    "serializing spec: {e}"
+                )));
+                return;
+            }
+        };
         let conn = match zbus::Connection::system().await {
             Ok(c) => c,
             Err(e) => {
@@ -155,9 +188,7 @@ pub fn spawn_install(
         let proxy = match InstallerProxy::new(&conn).await {
             Ok(p) => p,
             Err(e) => {
-                let _ = tx.send(DaemonEvent::ConnectionError(format!(
-                    "creating proxy: {e}"
-                )));
+                let _ = tx.send(DaemonEvent::ConnectionError(format!("creating proxy: {e}")));
                 return;
             }
         };
@@ -180,6 +211,15 @@ pub fn spawn_install(
                 return;
             }
         };
+        let mut progress_stream = match proxy.receive_progress().await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(DaemonEvent::ConnectionError(format!(
+                    "subscribing to Progress: {e}"
+                )));
+                return;
+            }
+        };
 
         // Cancel forwarder.
         let proxy_for_cancel = proxy.clone();
@@ -191,11 +231,8 @@ pub fn spawn_install(
 
         // Drive the install on its own task; meanwhile stream signals.
         let proxy_for_install = proxy.clone();
-        let install_handle = tokio::spawn(async move {
-            proxy_for_install
-                .install(&disk, &image, &hostname, &enc_type, &enc_arg)
-                .await
-        });
+        let install_handle =
+            tokio::spawn(async move { proxy_for_install.install_json(&spec_json).await });
 
         let step_tx = tx.clone();
         let log_tx = tx.clone();
@@ -215,6 +252,16 @@ pub fn spawn_install(
                     let _ = log_tx.send(DaemonEvent::Log {
                         stream: args.stream.to_owned(),
                         line: args.line.to_owned(),
+                    });
+                }
+            }
+        });
+        let progress_tx = tx.clone();
+        let progress_task = tokio::spawn(async move {
+            while let Some(sig) = progress_stream.next().await {
+                if let Ok(args) = sig.args() {
+                    let _ = progress_tx.send(DaemonEvent::Progress {
+                        percent: args.percent,
                     });
                 }
             }
@@ -243,6 +290,7 @@ pub fn spawn_install(
 
         step_task.abort();
         log_task.abort();
+        progress_task.abort();
     });
 }
 

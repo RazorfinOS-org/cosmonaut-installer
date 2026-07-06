@@ -9,6 +9,7 @@ description = "libcosmic GUI for installing COSMIC bootc images"
 
 [dependencies]
 cosmonaut-engine = { workspace = true }
+anyhow = { workspace = true }
 libcosmic = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

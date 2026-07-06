@@ -7,6 +7,7 @@ mod disks;
 mod images_json;
 mod pages;
 mod spec;
+mod widgets;
 
 fn main() -> cosmic::iced::Result {
     tracing_subscriber::fmt()
@@ -16,7 +17,7 @@ fn main() -> cosmic::iced::Result {
         .init();
 
     let settings = cosmic::app::Settings::default()
-        .size(cosmic::iced::Size::new(900.0, 640.0))
+        .size(cosmic::iced::Size::new(960.0, 720.0))
         .size_limits(
             cosmic::iced::Limits::NONE
                 .min_width(640.0)

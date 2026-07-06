@@ -5,14 +5,15 @@ use futures_util::StreamExt;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use cosmonaut_engine::Encryption;
+use cosmonaut_engine::{Encryption, InstallSpec, PartitionPlan};
 
 use crate::branding::Branding;
 use crate::daemon::{self, DaemonEvent};
 use crate::disks::Disk;
 use crate::images_json::{self, Catalog, ImageOption};
+use crate::pages::layout::{LayoutMsg, LayoutUiState};
 use crate::pages::{self, wifi as wifi_page, Page};
-use crate::spec::{EncryptionChoice, FinalSpec};
+use crate::spec::{EncryptionChoice, PartitionModeChoice};
 
 pub const APP_ID: &str = "dev.cosmonaut.Installer";
 const DEFAULT_HOSTNAME: &str = "cosmic";
@@ -36,6 +37,13 @@ pub struct App {
 
     disks: Vec<Disk>,
     disk_idx: Option<usize>,
+    /// Partitioning mode for the selected disk. Non-erase modes are
+    /// gated behind `COSMONAUT_EXPERIMENTAL_LAYOUT=1` until the
+    /// loopback matrix proves them out on real tables.
+    partition_mode: PartitionModeChoice,
+    experimental_layout: bool,
+    /// Custom-layout page state (only meaningful in Custom mode).
+    layout: LayoutUiState,
 
     encryption_choice: EncryptionChoice,
     passphrase: String,
@@ -64,11 +72,23 @@ pub struct App {
     install_log: String,
     install_in_flight: bool,
     cancel_tx: Option<oneshot::Sender<()>>,
+    /// Overall progress 0–100; None until the first Progress signal.
+    install_percent: Option<u8>,
+    /// Progress-page log expander ("Show details").
+    show_log: bool,
+    /// Current branding slide on the progress carousel.
+    slide_idx: usize,
 
     // Done page state
     install_success: bool,
     install_error: String,
     reboot_countdown: Option<u8>,
+    /// Step that was active when a failed install died (error page detail).
+    failed_step: Option<String>,
+    /// Spec of the last attempted install, kept so Retry can re-run it.
+    last_spec: Option<InstallSpec>,
+    /// Outcome of the last SaveLogs action: Ok(path) or Err(message).
+    logs_saved: Option<Result<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +104,9 @@ pub enum Message {
     // Page selections
     ImageSelected(usize),
     DiskSelected(usize),
+    PartitionModeSelected(PartitionModeChoice),
+    /// Custom-layout page interactions (see `pages::layout::LayoutMsg`).
+    Layout(LayoutMsg),
     EncryptionSelected(EncryptionChoice),
     PassphraseChanged(String),
 
@@ -105,10 +128,20 @@ pub enum Message {
     DaemonEvent(DaemonEvent),
     CancelInstall,
 
+    // Progress page extras
+    ToggleLogView,
+    SlideTick,
+
     // Done page
     RebootTick,
     RebootNow,
     Quit,
+
+    // Failure page actions
+    RetryInstall,
+    CopyLogs,
+    SaveLogs,
+    LogsSaved(Result<String, String>),
 }
 
 impl Application for App {
@@ -137,6 +170,10 @@ impl Application for App {
             catalog_loaded: false,
             disks: Vec::new(),
             disk_idx: None,
+            partition_mode: PartitionModeChoice::EraseDisk,
+            experimental_layout: std::env::var("COSMONAUT_EXPERIMENTAL_LAYOUT")
+                .is_ok_and(|v| v == "1"),
+            layout: LayoutUiState::default(),
             encryption_choice: EncryptionChoice::None,
             passphrase: String::new(),
             hostname: DEFAULT_HOSTNAME.to_owned(),
@@ -145,9 +182,15 @@ impl Application for App {
             install_log: String::new(),
             install_in_flight: false,
             cancel_tx: None,
+            install_percent: None,
+            show_log: false,
+            slide_idx: 0,
             install_success: false,
             install_error: String::new(),
             reboot_countdown: None,
+            failed_step: None,
+            last_spec: None,
+            logs_saved: None,
             wifi: wifi_page::WifiUiState::default(),
             wifi_online: None,
             tpm2_available: None,
@@ -166,15 +209,9 @@ impl Application for App {
             },
             |r| cosmic::Action::App(Message::CatalogLoaded(r)),
         );
-        let load_disks = Task::perform(
-            async {
-                tokio::task::spawn_blocking(crate::disks::list_blocking)
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()))
-            },
-            |r| cosmic::Action::App(Message::DisksLoaded(r)),
-        );
+        let load_disks = Task::perform(crate::disks::probe_with_fallback(), |r| {
+            cosmic::Action::App(Message::DisksLoaded(r))
+        });
         let probe_online = Task::perform(daemon::is_online(), |r| {
             cosmic::Action::App(Message::WifiOnlineProbed(r))
         });
@@ -202,7 +239,7 @@ impl Application for App {
                 self.on_page_entered(prev)
             }
             Message::Back => {
-                self.page = back_page(self.page);
+                self.page = back_page(self.page, self);
                 Task::none()
             }
 
@@ -232,28 +269,37 @@ impl Application for App {
                 if self.disks.len() == 1 {
                     self.disk_idx = Some(0);
                 }
+                // Geometry may have changed; the layout snapshot is stale.
+                self.layout = LayoutUiState::default();
+                self.apply_dev_page();
                 Task::none()
             }
             Message::DisksLoaded(Err(e)) => {
                 tracing::error!(error = %e, "lsblk failed");
                 Task::none()
             }
-            Message::RefreshDisks => Task::perform(
-                async {
-                    tokio::task::spawn_blocking(crate::disks::list_blocking)
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r.map_err(|e| e.to_string()))
-                },
-                |r| cosmic::Action::App(Message::DisksLoaded(r)),
-            ),
+            Message::RefreshDisks => Task::perform(crate::disks::probe_with_fallback(), |r| {
+                cosmic::Action::App(Message::DisksLoaded(r))
+            }),
 
             Message::ImageSelected(i) => {
                 self.image_idx = Some(i);
                 Task::none()
             }
             Message::DiskSelected(i) => {
+                if self.disk_idx != Some(i) {
+                    // Layout state is per-disk; invalidate on change.
+                    self.layout = LayoutUiState::default();
+                }
                 self.disk_idx = Some(i);
+                Task::none()
+            }
+            Message::PartitionModeSelected(mode) => {
+                self.partition_mode = mode;
+                Task::none()
+            }
+            Message::Layout(msg) => {
+                self.layout.update(msg);
                 Task::none()
             }
             Message::EncryptionSelected(c) => {
@@ -295,24 +341,43 @@ impl Application for App {
             Message::Wifi(msg) => self.wifi.update(msg),
 
             Message::StartInstall => {
-                let Some(spec) = self.build_final_spec() else {
+                let Some(spec) = self.build_install_spec() else {
                     tracing::error!("StartInstall fired without a complete spec");
                     return Task::none();
                 };
-                let (disk, image, hostname, enc_type, enc_arg) = spec.to_wire();
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
-                let (cancel_tx, cancel_rx) = oneshot::channel();
-                self.cancel_tx = Some(cancel_tx);
-                self.install_in_flight = true;
-                self.install_log.clear();
-                self.install_step = None;
-                self.install_step_detail.clear();
-                self.page = Page::Progress;
-                daemon::spawn_install(disk, image, hostname, enc_type, enc_arg, tx, cancel_rx);
-                Task::stream(
-                    UnboundedReceiverStream::new(rx)
-                        .map(|e| cosmic::Action::App(Message::DaemonEvent(e))),
+                self.start_install(spec)
+            }
+            Message::RetryInstall => match self.last_spec.clone() {
+                Some(spec) => self.start_install(spec),
+                None => {
+                    tracing::error!("RetryInstall fired without a stored spec");
+                    Task::none()
+                }
+            },
+            Message::CopyLogs => cosmic::iced::clipboard::write(self.failure_report()),
+            Message::SaveLogs => {
+                let report = self.failure_report();
+                Task::perform(
+                    async move {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let path = format!("/tmp/cosmonaut-install-{ts}.log");
+                        tokio::fs::write(&path, report)
+                            .await
+                            .map(|()| path)
+                            .map_err(|e| e.to_string())
+                    },
+                    |r| cosmic::Action::App(Message::LogsSaved(r)),
                 )
+            }
+            Message::LogsSaved(result) => {
+                if let Err(e) = &result {
+                    tracing::error!(error = %e, "saving install logs failed");
+                }
+                self.logs_saved = Some(result);
+                Task::none()
             }
 
             Message::DaemonEvent(event) => match event {
@@ -325,10 +390,22 @@ impl Application for App {
                     push_log(&mut self.install_log, &stream, &line);
                     Task::none()
                 }
+                DaemonEvent::Progress { percent } => {
+                    // Monotonic: ignore any out-of-order signal delivery.
+                    if self.install_percent.is_none_or(|p| percent > p) {
+                        self.install_percent = Some(percent);
+                    }
+                    Task::none()
+                }
                 DaemonEvent::Completed { success, error } => {
                     self.install_in_flight = false;
                     self.install_success = success;
                     self.install_error = error;
+                    if success {
+                        self.install_percent = Some(100);
+                    } else {
+                        self.failed_step = self.install_step.clone();
+                    }
                     self.page = Page::Done;
                     if success {
                         self.reboot_countdown = Some(REBOOT_COUNTDOWN_SECS);
@@ -343,6 +420,7 @@ impl Application for App {
                     self.install_in_flight = false;
                     self.install_success = false;
                     self.install_error = format!("DBus: {msg}");
+                    self.failed_step = self.install_step.clone();
                     self.page = Page::Done;
                     Task::none()
                 }
@@ -352,6 +430,22 @@ impl Application for App {
                     let _ = tx.send(());
                 }
                 Task::none()
+            }
+
+            Message::ToggleLogView => {
+                self.show_log = !self.show_log;
+                Task::none()
+            }
+            Message::SlideTick => {
+                // Stop rotating once the install is over.
+                if self.page != Page::Progress || self.branding.slides.is_empty() {
+                    return Task::none();
+                }
+                self.slide_idx = (self.slide_idx + 1) % self.branding.slides.len();
+                Task::perform(
+                    async { tokio::time::sleep(std::time::Duration::from_secs(12)).await },
+                    |_| cosmic::Action::App(Message::SlideTick),
+                )
             }
 
             Message::RebootTick => {
@@ -384,7 +478,13 @@ impl Application for App {
             Page::Welcome => pages::welcome::view(&self.branding),
             Page::Image => pages::image::view(&self.branding, &self.images, self.image_idx),
             Page::Wifi => pages::wifi::view(&self.wifi, Message::WifiSkip, Message::Back),
-            Page::Disk => pages::disk::view(&self.disks, self.disk_idx),
+            Page::Disk => pages::disk::view(
+                &self.disks,
+                self.disk_idx,
+                self.partition_mode,
+                self.experimental_layout,
+            ),
+            Page::CustomLayout => pages::layout::view(&self.layout),
             Page::Encryption => pages::encryption::view(
                 &self.encryption_choice,
                 &self.passphrase,
@@ -393,18 +493,31 @@ impl Application for App {
             Page::Confirm => {
                 let image = self.image_idx.and_then(|i| self.images.get(i));
                 let disk = self.disk_idx.and_then(|i| self.disks.get(i));
-                pages::confirm::view(image, disk, &self.encryption_choice, &self.hostname)
+                pages::confirm::view(
+                    image,
+                    disk,
+                    self.partition_mode,
+                    &self.layout,
+                    &self.encryption_choice,
+                    &self.hostname,
+                )
             }
             Page::Progress => pages::progress::view(
                 self.install_step.as_deref(),
                 &self.install_step_detail,
                 &self.install_log,
                 self.install_in_flight && self.cancellable_now(),
+                self.install_percent,
+                self.show_log,
+                self.branding.slides.get(self.slide_idx),
             ),
             Page::Done => pages::done::view(
                 &self.branding,
                 self.install_success,
                 &self.install_error,
+                self.failed_step.as_deref(),
+                &self.install_log,
+                self.logs_saved.as_ref(),
                 self.reboot_countdown,
             ),
         }
@@ -430,6 +543,71 @@ impl Application for App {
 }
 
 impl App {
+    /// Dev/screenshot hook: `COSMONAUT_DEV_PAGE=<page>` jumps straight
+    /// to a page once the disk probe lands, synthesizing plausible state
+    /// where a real install would normally provide it. Never set in
+    /// production images. Pages: welcome, image, disk, layout, encryption,
+    /// confirm, progress, done-ok, done-fail.
+    fn apply_dev_page(&mut self) {
+        let Ok(page) = std::env::var("COSMONAUT_DEV_PAGE") else {
+            return;
+        };
+        if self.image_idx.is_none() && !self.images.is_empty() {
+            self.image_idx = Some(0);
+        }
+        if self.disk_idx.is_none() && !self.disks.is_empty() {
+            self.disk_idx = Some(0);
+        }
+        match page.as_str() {
+            "image" => self.page = Page::Image,
+            "disk" => self.page = Page::Disk,
+            "layout" => {
+                self.partition_mode = PartitionModeChoice::Custom;
+                if let Some(disk) = self.disk_idx.and_then(|i| self.disks.get(i)) {
+                    self.layout.reset_for(disk);
+                }
+                self.page = Page::CustomLayout;
+            }
+            "encryption" => self.page = Page::Encryption,
+            "confirm" => self.page = Page::Confirm,
+            "progress" => {
+                self.install_step = Some("bootc".into());
+                self.install_step_detail =
+                    "installing oci:/usr/lib/bootc/install-source/main".into();
+                self.install_percent = Some(47);
+                self.install_in_flight = true;
+                for i in 1..=14 {
+                    push_log(
+                        &mut self.install_log,
+                        "stdout",
+                        &format!("Copying blob sha256:{i:064x}"),
+                    );
+                }
+                self.page = Page::Progress;
+            }
+            "done-ok" => {
+                self.install_success = true;
+                self.reboot_countdown = Some(23);
+                self.page = Page::Done;
+            }
+            "done-fail" => {
+                self.install_success = false;
+                self.failed_step = Some("bootc".into());
+                self.install_error =
+                    "bootc: skopeo copy: writing blob: no space left on device".into();
+                for i in 1..=10 {
+                    push_log(
+                        &mut self.install_log,
+                        if i % 3 == 0 { "stderr" } else { "stdout" },
+                        &format!("Copying blob sha256:{i:064x}"),
+                    );
+                }
+                self.page = Page::Done;
+            }
+            _ => {}
+        }
+    }
+
     /// Side-effect for transitioning into a new page (called from
     /// `Message::Next`'s handler, *after* `next_page` resolved). The
     /// wifi page uses this hook to spawn its NM secret agent on first
@@ -439,8 +617,78 @@ impl App {
     fn on_page_entered(&mut self, _from: Page) -> Task<Message> {
         match self.page {
             Page::Wifi => self.wifi.on_first_enter(),
+            Page::CustomLayout => {
+                // (Re)build layout state for the selected disk when absent
+                // or built for a different disk.
+                if let Some(disk) = self.disk_idx.and_then(|i| self.disks.get(i)) {
+                    let stale = self
+                        .layout
+                        .disk
+                        .as_ref()
+                        .is_none_or(|d| d.path != disk.path);
+                    if stale {
+                        self.layout.reset_for(disk);
+                    }
+                }
+                Task::none()
+            }
             _ => Task::none(),
         }
+    }
+
+    /// Kick off an install of `spec` and switch to the Progress page.
+    /// Shared by `StartInstall` (fresh spec from the wizard) and
+    /// `RetryInstall` (stored spec after a failure).
+    fn start_install(&mut self, spec: InstallSpec) -> Task<Message> {
+        self.last_spec = Some(spec.clone());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DaemonEvent>();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        self.cancel_tx = Some(cancel_tx);
+        self.install_in_flight = true;
+        self.install_log.clear();
+        self.install_step = None;
+        self.install_step_detail.clear();
+        self.failed_step = None;
+        self.logs_saved = None;
+        self.install_percent = None;
+        self.show_log = false;
+        self.slide_idx = 0;
+        self.page = Page::Progress;
+        daemon::spawn_install(spec, tx, cancel_rx);
+        let events = Task::stream(
+            UnboundedReceiverStream::new(rx).map(|e| cosmic::Action::App(Message::DaemonEvent(e))),
+        );
+        if self.branding.slides.is_empty() {
+            events
+        } else {
+            let tick = Task::perform(
+                async { tokio::time::sleep(std::time::Duration::from_secs(12)).await },
+                |_| cosmic::Action::App(Message::SlideTick),
+            );
+            Task::batch([events, tick])
+        }
+    }
+
+    /// Plain-text failure report for the Copy/Save logs actions. Includes
+    /// the spec summary (passphrase never included), failing step, error,
+    /// and the retained log buffer tail.
+    fn failure_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("cosmonaut-installer failure report\n");
+        if let Some(spec) = &self.last_spec {
+            report.push_str(&format!("image: {}\n", spec.image));
+            report.push_str(&format!("disk: {}\n", spec.disk.display()));
+            report.push_str(&format!("hostname: {}\n", spec.hostname));
+        }
+        report.push_str(&format!("encryption: {}\n", self.encryption_choice.label()));
+        report.push_str(&format!(
+            "failed step: {}\n",
+            self.failed_step.as_deref().unwrap_or("(before first step)")
+        ));
+        report.push_str(&format!("error: {}\n", self.install_error));
+        report.push_str("\n--- log (tail) ---\n");
+        report.push_str(&self.install_log);
+        report
     }
 
     /// Cancel button is active until we hit the bootc step (which is past
@@ -453,7 +701,29 @@ impl App {
         }
     }
 
-    fn build_final_spec(&self) -> Option<FinalSpec> {
+    /// The engine plan the current wizard state describes, or None when
+    /// the mode needs input that isn't there (no gap, invalid layout).
+    fn build_plan(&self) -> Option<PartitionPlan> {
+        match self.partition_mode {
+            PartitionModeChoice::EraseDisk => Some(PartitionPlan::EraseDisk),
+            PartitionModeChoice::FreeSpace => {
+                let disk = self.disks.get(self.disk_idx?)?;
+                let gap = disk.largest_gap()?;
+                Some(PartitionPlan::FreeSpace {
+                    gap_start_bytes: gap.start_bytes,
+                    gap_size_bytes: gap.size_bytes,
+                })
+            }
+            PartitionModeChoice::Custom => {
+                self.layout.validate().ok()?;
+                Some(PartitionPlan::Custom {
+                    actions: self.layout.to_actions(),
+                })
+            }
+        }
+    }
+
+    fn build_install_spec(&self) -> Option<InstallSpec> {
         let image = self.images.get(self.image_idx?)?.imgref.clone();
         let disk = self.disks.get(self.disk_idx?)?.path.clone();
         let encryption = match &self.encryption_choice {
@@ -466,11 +736,12 @@ impl App {
                 passphrase: self.passphrase.clone(),
             },
         };
-        Some(FinalSpec {
+        Some(InstallSpec {
             image,
             disk,
             hostname: self.hostname.clone(),
             encryption,
+            plan: self.build_plan()?,
         })
     }
 }
@@ -498,20 +769,34 @@ fn next_page(current: Page, app: &App) -> Page {
             }
         }
         Page::Wifi => page_after_wifi(),
-        Page::Disk => Page::Encryption,
+        Page::Disk => {
+            if app.partition_mode == PartitionModeChoice::Custom {
+                Page::CustomLayout
+            } else {
+                Page::Encryption
+            }
+        }
+        Page::CustomLayout => Page::Encryption,
         Page::Encryption => Page::Confirm,
         Page::Confirm => Page::Progress, // routed via StartInstall
         Page::Progress | Page::Done => current,
     }
 }
 
-fn back_page(current: Page) -> Page {
+fn back_page(current: Page, app: &App) -> Page {
     match current {
         Page::Welcome | Page::Progress | Page::Done => current,
         Page::Image => Page::Welcome,
         Page::Wifi => Page::Image, // (or Welcome if Image was auto-skipped — harmless)
         Page::Disk => Page::Wifi,
-        Page::Encryption => Page::Disk,
+        Page::CustomLayout => Page::Disk,
+        Page::Encryption => {
+            if app.partition_mode == PartitionModeChoice::Custom {
+                Page::CustomLayout
+            } else {
+                Page::Disk
+            }
+        }
         Page::Confirm => Page::Encryption,
     }
 }
@@ -536,4 +821,3 @@ fn push_log(log: &mut String, stream: &str, line: &str) {
         log.drain(..cut);
     }
 }
-

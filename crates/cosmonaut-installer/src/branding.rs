@@ -12,16 +12,22 @@
 //!    shipped by cosmic-build-meta.
 //! 4. Built-in fallback: `{ "name": "COSMIC" }`.
 //!
-//! Schema (all fields optional except `name`):
+//! Schema (all fields optional):
 //!
 //! ```json
 //! {
-//!   "name": "RazorfinOS"
+//!   "name": "RazorfinOS",
+//!   "slides": [
+//!     { "title": "Welcome aboard", "body": "RazorfinOS updates atomically…" },
+//!     { "title": "Your apps", "body": "Flatpaks come preconfigured…" }
+//!   ]
 //! }
 //! ```
 //!
-//! Future-proofing: extra fields (tagline, logo path, accent color) can
-//! be added later; unknown fields in the file are tolerated.
+//! `slides` feed the install-progress carousel; with none present the
+//! progress page keeps its plain layout. Future-proofing: extra fields
+//! (tagline, logo path, accent color) can be added later; unknown
+//! fields in the file are tolerated.
 
 use std::path::PathBuf;
 
@@ -43,6 +49,17 @@ struct BrandingFile {
     /// missing or empty.
     #[serde(default)]
     name: Option<String>,
+    /// Feature slides rotated on the progress page during the install.
+    #[serde(default)]
+    slides: Vec<Slide>,
+}
+
+/// One progress-page carousel slide (text-only for now; an optional
+/// image path can be added later without breaking existing files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Slide {
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +70,7 @@ pub struct Branding {
     pub welcome_body: String,
     pub image_description: String,
     pub done_success_body: String,
+    pub slides: Vec<Slide>,
 }
 
 impl Default for Branding {
@@ -63,6 +81,10 @@ impl Default for Branding {
 
 impl Branding {
     fn from_name(name: &str) -> Self {
+        Self::from_parts(name, Vec::new())
+    }
+
+    fn from_parts(name: &str, slides: Vec<Slide>) -> Self {
         Self {
             name: name.to_string(),
             installer_title: format!("{name} Installer"),
@@ -71,10 +93,9 @@ impl Branding {
                 "This installer will set up {name} on the disk you choose. \
                  Existing data on that disk will be erased."
             ),
-            image_description: format!(
-                "Pick which {name} image to install on the target disk."
-            ),
+            image_description: format!("Pick which {name} image to install on the target disk."),
             done_success_body: format!("{name} is installed. The system will reboot shortly."),
+            slides,
         }
     }
 
@@ -105,9 +126,10 @@ impl Branding {
                         tracing::info!(
                             path = %path.display(),
                             %name,
+                            slides = file.slides.len(),
                             "loaded branding"
                         );
-                        return Self::from_name(&name);
+                        return Self::from_parts(&name, file.slides);
                     }
                     Err(e) => {
                         tracing::warn!(

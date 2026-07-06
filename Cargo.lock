@@ -1129,6 +1129,7 @@ dependencies = [
  "futures-util",
  "nix",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -1141,6 +1142,7 @@ dependencies = [
 name = "cosmonaut-installer"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "cosmic-settings-network-manager-subscription",
  "cosmonaut-engine",
  "eyre",
@@ -1163,7 +1165,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cosmonaut-engine",
  "futures-util",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1177,6 +1181,7 @@ dependencies = [
  "anyhow",
  "cosmonaut-engine",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

@@ -1,11 +1,11 @@
-use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::widget::{self, button, radio, row, scrollable, settings, text};
+use cosmic::Element;
 
 use crate::app::Message;
 use crate::branding::Branding;
 use crate::images_json::ImageOption;
-use crate::pages::wizard_frame;
+use crate::pages::{wizard_frame, Page};
 
 pub fn view<'a>(
     branding: &'a Branding,
@@ -23,6 +23,7 @@ pub fn view<'a>(
             row::with_capacity(1)
                 .push(button::standard("Back").on_press(Message::Back))
                 .into(),
+            Page::Image,
         );
     }
 
@@ -32,7 +33,12 @@ pub fn view<'a>(
             Some(d) => format!("{}\n{}", opt.name, d),
             None => opt.name.clone(),
         };
-        section = section.add(radio(text::body(label), idx, selected, Message::ImageSelected));
+        section = section.add(radio(
+            text::body(label),
+            idx,
+            selected,
+            Message::ImageSelected,
+        ));
     }
 
     let body = scrollable(section).height(Length::Fill).width(Length::Fill);
@@ -40,15 +46,13 @@ pub fn view<'a>(
     let nav = row::with_capacity(2)
         .spacing(12)
         .push(button::standard("Back").on_press(Message::Back))
-        .push(
-            button::suggested("Continue")
-                .on_press_maybe(selected.map(|_| Message::Next)),
-        );
+        .push(button::suggested("Continue").on_press_maybe(selected.map(|_| Message::Next)));
 
     wizard_frame(
         "Choose an image",
         Some(branding.image_description.as_str()),
         body.into(),
         nav.into(),
+        Page::Image,
     )
 }

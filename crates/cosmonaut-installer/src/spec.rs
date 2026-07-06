@@ -1,18 +1,7 @@
-//! GUI-side install spec — collected piece-by-piece across wizard pages,
-//! converted to the daemon's flat wire form right before `Install()` is
-//! called.
-
-use std::path::PathBuf;
-
-use cosmonaut_engine::Encryption;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct DraftSpec {
-    pub image: Option<String>,
-    pub disk: Option<PathBuf>,
-    pub encryption: EncryptionChoice,
-}
+//! GUI-side install-spec helpers. The wire type is
+//! `cosmonaut_engine::InstallSpec` itself (serialized to JSON for the
+//! daemon's `InstallJson` method); this module only keeps the wizard's
+//! intermediate choices.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EncryptionChoice {
@@ -38,33 +27,26 @@ impl EncryptionChoice {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FinalSpec {
-    pub image: String,
-    pub disk: PathBuf,
-    pub hostname: String,
-    pub encryption: Encryption,
+/// Which partitioning mode the disk page has selected. Maps onto
+/// `cosmonaut_engine::PartitionPlan` once the concrete gap/actions are
+/// known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PartitionModeChoice {
+    /// Erase the whole disk (default, always available).
+    #[default]
+    EraseDisk,
+    /// Install into the largest free-space gap.
+    FreeSpace,
+    /// Per-partition role assignment on a dedicated page.
+    Custom,
 }
 
-impl FinalSpec {
-    /// Convert into the daemon's flat `(disk, image, hostname, enc_type, enc_arg)` tuple.
-    pub fn to_wire(&self) -> (String, String, String, String, String) {
-        let (et, ea) = match &self.encryption {
-            Encryption::None => ("none".to_owned(), String::new()),
-            Encryption::LuksPassphrase { passphrase } => {
-                ("luks-passphrase".to_owned(), passphrase.clone())
-            }
-            Encryption::Tpm2Luks => ("tpm2-luks".to_owned(), String::new()),
-            Encryption::Tpm2LuksPassphrase { passphrase } => {
-                ("tpm2-luks-passphrase".to_owned(), passphrase.clone())
-            }
-        };
-        (
-            self.disk.to_string_lossy().into_owned(),
-            self.image.clone(),
-            self.hostname.clone(),
-            et,
-            ea,
-        )
+impl PartitionModeChoice {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::EraseDisk => "Erase entire disk",
+            Self::FreeSpace => "Install into free space",
+            Self::Custom => "Custom layout",
+        }
     }
 }

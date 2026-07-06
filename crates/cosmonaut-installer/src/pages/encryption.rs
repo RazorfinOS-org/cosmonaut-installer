@@ -1,9 +1,9 @@
-use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::widget::{self, button, radio, row, scrollable, settings, text, text_input};
+use cosmic::Element;
 
 use crate::app::Message;
-use crate::pages::wizard_frame;
+use crate::pages::{wizard_frame, Page};
 use crate::spec::EncryptionChoice;
 
 pub fn view<'a>(
@@ -55,17 +55,17 @@ pub fn view<'a>(
     let nav = row::with_capacity(2)
         .spacing(12)
         .push(button::standard("Back").on_press(Message::Back))
-        .push(
-            button::suggested("Continue")
-                .on_press_maybe(valid.then_some(Message::Next)),
-        );
+        .push(button::suggested("Continue").on_press_maybe(valid.then_some(Message::Next)));
 
-    let body = scrollable(body_column).height(Length::Fill).width(Length::Fill);
+    let body = scrollable(body_column)
+        .height(Length::Fill)
+        .width(Length::Fill);
 
     wizard_frame(
         "Encryption",
         Some("Pick how the target disk should be encrypted."),
         body.into(),
         nav.into(),
+        Page::Encryption,
     )
 }
