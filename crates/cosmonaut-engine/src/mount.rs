@@ -3,8 +3,12 @@
 //! Layout:
 //!
 //!   /run/cosmonaut/target              <- root (btrfs or LUKS-mapper)
-//!   /run/cosmonaut/target/boot         <- /boot (ext4)
+//!   /run/cosmonaut/target/boot         <- /boot (ext4; erase layout only)
 //!   /run/cosmonaut/target/boot/efi     <- ESP (FAT32)
+//!
+//! Layouts without a boot partition keep /boot as a plain directory on
+//! the root filesystem — the shape bootc's own `install to-disk`
+//! produces (it automounts the ESP at /boot post-boot).
 //!
 //! `bootc install to-filesystem` operates on the root mount; it discovers
 //! /boot and /boot/efi by examining mountinfo for the path it's given.
@@ -14,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::partition::Partitions;
+use crate::partition::PartitionSet;
 use crate::runner;
 use crate::Event;
 
@@ -22,22 +26,26 @@ use crate::Event;
 /// vanishes on reboot.
 pub const TARGET_ROOT: &str = "/run/cosmonaut/target";
 
-pub async fn run(
-    root: &Path,
-    parts: &Partitions,
-    events: &mpsc::Sender<Event>,
-) -> Result<()> {
+pub async fn run(root: &Path, parts: &PartitionSet, events: &mpsc::Sender<Event>) -> Result<()> {
     let target = PathBuf::from(TARGET_ROOT);
     let boot = target.join("boot");
     let efi = boot.join("efi");
 
-    tokio::fs::create_dir_all(&target).await.context("mkdir target")?;
+    tokio::fs::create_dir_all(&target)
+        .await
+        .context("mkdir target")?;
 
     mount_subprocess(root, &target, "btrfs", &[], events).await?;
-    tokio::fs::create_dir_all(&boot).await.context("mkdir target/boot")?;
+    tokio::fs::create_dir_all(&boot)
+        .await
+        .context("mkdir target/boot")?;
 
-    mount_subprocess(&parts.boot, &boot, "ext4", &[], events).await?;
-    tokio::fs::create_dir_all(&efi).await.context("mkdir target/boot/efi")?;
+    if let Some(boot_part) = &parts.boot {
+        mount_subprocess(boot_part, &boot, "ext4", &[], events).await?;
+    }
+    tokio::fs::create_dir_all(&efi)
+        .await
+        .context("mkdir target/boot/efi")?;
 
     mount_subprocess(&parts.esp, &efi, "vfat", &["umask=0077"], events).await?;
     Ok(())

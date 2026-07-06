@@ -5,13 +5,22 @@ use tokio::sync::mpsc;
 
 use crate::mount::{self, TARGET_ROOT};
 use crate::runner;
-use crate::{luks, Event};
+use crate::{luks, Event, LogStream};
 
 pub async fn run(luks_in_use: bool, events: &mpsc::Sender<Event>) -> Result<()> {
-    // fstrim the root mount (best-effort; may not apply on all backings).
-    runner::run("fstrim", &["-v", TARGET_ROOT], events)
-        .await
-        .context("fstrim")?;
+    // fstrim the root mount. Genuinely best-effort: the backing device
+    // may not support discard at all (spinning rust, some VM configs),
+    // and dm-crypt mappings reject it unless opened with
+    // --allow-discards. A failed trim must never fail the install —
+    // observed live on a LUKS install, 2026-07-05.
+    if let Err(e) = runner::run("fstrim", &["-v", TARGET_ROOT], events).await {
+        let _ = events
+            .send(Event::Log {
+                stream: LogStream::Engine,
+                line: format!("fstrim skipped: {e}"),
+            })
+            .await;
+    }
 
     mount::unmount_all().await.context("unmount_all")?;
 

@@ -9,9 +9,52 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::runner;
-use crate::Event;
+use crate::{Event, LogStream, Step};
 
 pub use crate::mount::TARGET_ROOT;
+
+/// The bootc step's progress band: skopeo layer copies interpolate
+/// across it; the trailing `bootc install` run gets the tail.
+const COPY_BAND_START: u8 = 10;
+const COPY_BAND_END: u8 = 75;
+
+/// Layer count from `skopeo inspect --raw`. None when the ref points at
+/// a manifest list / unreadable manifest — progress then stays at the
+/// step baseline instead of guessing.
+async fn layer_count(source: &str) -> Option<usize> {
+    let raw = runner::capture_stdout("skopeo", &["inspect", "--raw", source])
+        .await
+        .ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(manifest.get("layers")?.as_array()?.len())
+}
+
+/// Forward events from `rx` to `events`, translating skopeo's per-blob
+/// "Copying blob …" stdout lines into `Event::Progress` updates.
+async fn forward_with_progress(
+    mut rx: mpsc::Receiver<Event>,
+    events: mpsc::Sender<Event>,
+    total_layers: Option<usize>,
+) {
+    let mut copied: usize = 0;
+    while let Some(event) = rx.recv().await {
+        if let (Event::Log { stream, line }, Some(total)) = (&event, total_layers) {
+            if *stream == LogStream::Stdout && line.starts_with("Copying blob") && total > 0 {
+                copied += 1;
+                let span = f64::from(COPY_BAND_END - COPY_BAND_START);
+                let frac = (copied.min(total) as f64) / (total as f64);
+                let percent = COPY_BAND_START + (span * frac) as u8;
+                let _ = events
+                    .send(Event::Progress {
+                        percent,
+                        step: Step::Bootc,
+                    })
+                    .await;
+            }
+        }
+        let _ = events.send(event).await;
+    }
+}
 
 /// Where skopeo writes the OCI layout for `--source-imgref oci:…`.
 const OCI_CACHE_DIR: &str = "/run/cosmonaut/scratch/oci-cache";
@@ -85,15 +128,31 @@ pub async fn run(
     // do on its own).
     let source = skopeo_source(image);
     let dest = format!("oci:{OCI_CACHE_DIR}");
+
+    // Layer total for real percent inside the copy; unknown → the bar
+    // simply holds at the step baseline (honest indeterminacy).
+    let total_layers = layer_count(&source).await;
+
+    // Interpose on the subprocess event stream to count copied blobs.
+    let (itx, irx) = mpsc::channel::<Event>(256);
+    let forwarder = tokio::spawn(forward_with_progress(irx, events.clone(), total_layers));
+
     let skopeo_args: [&str; 3] = ["copy", &source, &dest];
-    let copy_fut = runner::run("skopeo", &skopeo_args, events);
-    tokio::select! {
+    let copy_result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during skopeo copy");
-        }
-        r = copy_fut => r.context("skopeo copy")?,
-    }
+        _ = cancel.cancelled() => Err(anyhow::anyhow!("cancelled during skopeo copy")),
+        r = runner::run("skopeo", &skopeo_args, &itx) => r.context("skopeo copy"),
+    };
+    drop(itx);
+    let _ = forwarder.await;
+    copy_result?;
+
+    let _ = events
+        .send(Event::Progress {
+            percent: COPY_BAND_END,
+            step: Step::Bootc,
+        })
+        .await;
 
     // 2. bootc install to-filesystem ...
     let source_imgref = format!("oci:{OCI_CACHE_DIR}");

@@ -96,10 +96,7 @@ pub async fn run_with_stdin(
 
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(stdin_data)
-            .await
-            .context("writing stdin")?;
+        stdin.write_all(stdin_data).await.context("writing stdin")?;
         stdin.shutdown().await.context("closing stdin")?;
     }
 

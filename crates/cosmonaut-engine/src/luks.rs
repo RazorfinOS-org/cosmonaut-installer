@@ -73,11 +73,7 @@ pub async fn partition_uuid(root_part: &Path) -> Result<String> {
     Ok(uuid)
 }
 
-async fn luks_format(
-    root: &str,
-    passphrase: &str,
-    events: &mpsc::Sender<Event>,
-) -> Result<()> {
+async fn luks_format(root: &str, passphrase: &str, events: &mpsc::Sender<Event>) -> Result<()> {
     runner::run_with_stdin(
         "cryptsetup",
         &[
@@ -96,14 +92,20 @@ async fn luks_format(
     .context("cryptsetup luksFormat")
 }
 
-async fn luks_open(
-    root: &str,
-    passphrase: &str,
-    events: &mpsc::Sender<Event>,
-) -> Result<()> {
+async fn luks_open(root: &str, passphrase: &str, events: &mpsc::Sender<Event>) -> Result<()> {
+    // --allow-discards lets fstrim reach the disk through the mapping
+    // during finalize. Install-time only — the deployed system's own
+    // discard policy comes from its crypttab/rd.luks.options.
     runner::run_with_stdin(
         "cryptsetup",
-        &["luksOpen", "--key-file", "-", root, MAPPER_NAME],
+        &[
+            "luksOpen",
+            "--allow-discards",
+            "--key-file",
+            "-",
+            root,
+            MAPPER_NAME,
+        ],
         passphrase.as_bytes(),
         events,
     )
