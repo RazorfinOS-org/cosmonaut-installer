@@ -126,8 +126,63 @@ we either:
 
 ## What still needs in-VM verification (Phase 1+ work, not blocking)
 
-- The full step pipeline against a real disk, end-to-end, with reboot
-  into the deployed system. Best done while developing the engine.
-- LUKS path: confirm `rd.luks.uuid=` injection into BLS entries actually
-  unlocks at first boot.
 - Cancel semantics: what does a SIGTERM mid-`bootc install` leave behind?
+
+## Spike S1 findings — boot layout ground truth (2026-07-05)
+
+Probed by driving real installs on the `cosmic-nvidia` live ISO
+(bootc 1.15.0, QEMU/OVMF, cosmonaut CLI over the ttyS1 debug shell)
+and inspecting/booting the resulting target disk.
+
+**Where boot artifacts actually live (composefs backend):**
+
+- The **ESP carries everything**: systemd-boot, the kernel + initrd
+  under `EFI/Linux/bootc_composefs-<digest>/`, and the BLS entry at
+  `loader/entries/bootc_<name>-<version>.conf`.
+- The **ext4 `/boot` partition ends the install completely empty**
+  (just `efi/` as a stale mountpoint + `lost+found`). Nothing reads
+  BLS entries from it; the XBOOTLDR question is moot. It is a
+  fisherman-era vestige.
+- The generated cmdline has **no `root=` karg**. It carries
+  `boot=UUID=<ext4-boot-fs-uuid>` + `composefs=<digest>`; root
+  discovery happens via systemd-gpt-auto (the root partition carries
+  the root-x86-64 type GUID) + the composefs initrd logic.
+- bootc's own `install to-disk` layout (the `bootable.raw` recipe) is
+  **BIOS-BOOT + ESP + root only** — no separate boot partition; the
+  deployed system automounts the ESP at `/boot`. That is the canonical
+  layout for this backend.
+
+**Two release-blocking bugs found and fixed:**
+
+1. **LUKS installs failed at the bls step** — `bls.rs` looked for
+   entries at `target/boot/loader/entries` (the empty ext4), but they
+   are on the ESP (`target/boot/efi/loader/entries`). Fixed: prefer
+   the ESP path, fall back to the legacy path. The README's "LUKS E2E
+   works" note predated the composefs backend switch.
+2. **`rd.luks.uuid=` boots into emergency mode** — with no `root=`
+   karg, systemd-gpt-auto generates its own
+   `systemd-cryptsetup@root.service` for the LUKS root; `rd.luks.uuid`
+   creates a second, differently-named unit and the two race for the
+   device — the loser fails the boot. Fixed: inject
+   `rd.luks.name=<uuid>=root` so both generators converge on one
+   `root` unit. Verified: single prompt, passphrase unlocks, boot
+   reaches `cosmic login:`.
+
+Also fixed along the way: `fstrim` failure no longer fails the whole
+install (it is genuinely best-effort; dm-crypt rejects discard unless
+opened with `--allow-discards`, which the engine now passes).
+
+**Consequence for the partitioning-mode work (Phase 2):** new layouts
+should be **ESP + root** (no ext4 boot partition). The erase path keeps
+the legacy 3-partition layout until the ESP+root variant is verified
+end-to-end in QEMU, then drops the vestigial partition too. Whether
+bootc omits/repoints `boot=UUID=` when the target has no separate boot
+mount must be verified during Phase 2 (bootc's own to-disk layout
+demonstrates it handles this).
+
+## Image-source note (updated 2026-07-05)
+
+The section above about network-required installs is stale: current
+ISOs bake the OCI source into the live filesystem and images.json
+points at `oci:/usr/lib/bootc/install-source/main` — the default
+install is fully offline.

@@ -9,17 +9,20 @@ A native [libcosmic](https://github.com/pop-os/libcosmic) installer for [COSMIC]
   - `cosmonaut-installer-daemon` — DBus system service (root) hosting the install engine
   - `cosmonaut-installer-cli` — headless driver for CI / scripted installs
   - `cosmonaut-engine` — install orchestrator, linked into the daemon
-- **End-to-end install works** in QEMU on the cosmic-build-meta Live ISO: cosmonaut autostarts in the `cosmic-live` session, the wizard collects (image, disk, encryption), the daemon drives the 9-step pipeline, the system reboots into the deployed COSMIC.
+- **End-to-end install works** in QEMU on the cosmic-build-meta Live ISO: cosmonaut autostarts in the `cosmic-live` session, the wizard collects (image, disk, partitioning mode, encryption), the daemon drives the pipeline, the system reboots into the deployed COSMIC. Erase, free-space, and custom-layout installs plus the LUKS-passphrase unlock chain are all E2E-verified (2026-07-05).
+- **Partitioning modes**: erase whole disk (default), install into free space (keeps existing partitions, reuses an existing ESP), and custom per-partition role assignment — the latter two env-gated behind `COSMONAUT_EXPERIMENTAL_LAYOUT=1` until the loopback matrix runs routinely in CI. Non-erase layouts are ESP+root only (bootc's canonical composefs shape); the plan is validated engine-side against a fresh probe before anything is touched.
+- **OS detection**: the daemon's `ProbeDisks` ro-mounts candidate partitions to read `os-release` / BLS entry titles / Windows markers, and the GUI names what's on each disk (and what an erase would destroy).
+- **Failure UX**: error page with the failing step and log tail, copy/save-logs actions, retry-from-scratch (the engine pre-cleans stale mounts/mappers); all subprocess output is mirrored to the daemon journal.
 - **Live-only ship** — depended on by `oci/cosmic-live/stack.bst` and `oci/cosmic-nvidia-live/stack.bst` in cosmic-build-meta; the deployed installed system inherits no cosmonaut files.
-- **DBus contract**: well-known name `dev.cosmonaut.Installer1`, object path `/dev/cosmonaut/Installer1`. Methods: `Install(disk, image, hostname, enc_type, enc_arg)` (blocks until done), `Cancel() -> bool`. Properties: `State`, `CurrentStep`. Signals: `StepChanged(step, detail)`, `LogLine(stream, line)`, `Completed(success, error)`.
+- **DBus contract**: well-known name `dev.cosmonaut.Installer1`, object path `/dev/cosmonaut/Installer1`. Methods: `InstallJson(spec_json)` (serde-serialized `cosmonaut_engine::InstallSpec`; blocks until done), `Cancel() -> bool`, `ProbeDisks() -> String` (JSON `Vec<DiskInfo>`). Properties: `State`, `CurrentStep`. Signals: `StepChanged(step, detail)`, `LogLine(stream, line)`, `Progress(percent, step)`, `Completed(success, error)`.
 
 **Known caveats**
 
-- **No wifi page yet** — Phase 2a per the plan. Wired networks (DHCP) work via systemd-networkd in the live env; wireless installs need a working iwd-managed link before launching cosmonaut.
-- **TPM2-LUKS variants** — the engine implements `tpm2-luks` and `tpm2-luks-passphrase` (via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7`) and the GUI exposes the radio buttons, but neither path has been E2E tested in QEMU+swtpm.
+- **TPM2-LUKS variants** — the engine implements `tpm2-luks` and `tpm2-luks-passphrase` (via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7`) and the GUI exposes the radio buttons, but neither path has been E2E tested in QEMU+swtpm. (`luks-passphrase` **is** E2E verified — install + first-boot unlock — as of 2026-07-05; see `docs/install-pipeline.md` §Spike S1.)
 - **Cancel only works pre-bootc** — once the engine reaches the `bootc install to-filesystem` step, the GUI Cancel button greys out. There is no clean rollback path from a partially-deployed bootc install.
-- **Subprocess stderr is GUI-only** — engine subprocesses (skopeo, bootc, cryptsetup, mkfs.*) stream their output via DBus `LogLine` signals to whoever's listening. The daemon does not also mirror them into its own journal, so once the GUI navigates away, the failure context is lost. Diagnostic polish item.
-- **No CI yet** — no GH Actions workflow; everything is built and tested locally so far. Phase 4 in the cosmic-build-meta plan adds a QEMU E2E gate.
+- **CI needs its first runs** — `.github/workflows/ci.yml` (fmt/clippy/tests + root loopback suite) and `e2e.yml` (nightly QEMU install matrix) exist but haven't run on GitHub yet; e2e also needs cosmic-build-meta to publish a `live-iso` artifact. The E2E driver (`tests/e2e/run-e2e.sh`) is locally verified. The loopback suite (`just test-engine`) needs a local sudo run.
+- **Vestigial /boot partition (erase mode only)** — the erase layout still creates a 1 GiB ext4 `/boot` that bootc's composefs backend leaves empty (everything lives on the ESP). Free-space/custom layouts already omit it and boot fine; erase mode drops it once that's soak-tested.
+- **skopeo scratch lives on tmpfs** — `/run/cosmonaut/scratch` means the live env needs RAM > compressed image size during the copy. Fine for typical machines; a low-RAM fallback (scratch on the freshly-formatted target) is future work.
 
 ## Quick start
 
@@ -71,6 +74,8 @@ Cosmonaut autostarts in the cosmic-live session. Click through the wizard; the i
 | Env var | Default | Effect |
 |---|---|---|
 | `COSMONAUT_IMAGES_JSON` | unset | If set, overrides the catalog path (`/etc/cosmonaut-installer/images.json` and the historical `/etc/bootc-installer/images.json` fallback). Useful for host-side dev runs. |
+| `COSMONAUT_BRANDING_JSON` | unset | If set, overrides the branding path (name + progress-page slides). See `crates/cosmonaut-installer/src/branding.rs` for the schema. |
+| `COSMONAUT_EXPERIMENTAL_LAYOUT` | unset | `1` shows the free-space and custom partitioning modes on the disk page. Erase mode is always available. |
 | `RUST_LOG` | `info` | Tracing filter. `cosmonaut_engine=debug` to see every subprocess `+ command…` line + every stdout/stderr line on the GUI's stderr too. |
 
 The deployed system's hostname is hardcoded to `cosmic` by the install (a first-boot wizard step in cosmic-initial-setup lets the user rename). The image, disk, and encryption knobs are collected in the wizard.
@@ -172,7 +177,7 @@ Each step emits a typed `Step` event over an mpsc channel; the daemon re-broadca
 | Component / area | Workaround / note |
 |---|---|
 | skopeo source ref | Bare registry refs (`ngcr.io/foo:bar`) are wrapped in `docker://` before being passed to `skopeo copy`; refs with explicit transport prefixes (`oci:`, `containers-storage:`, etc.) pass through unchanged |
-| BLS entries dir | Engine's BLS step expects `/boot/loader/entries/*.conf` to exist after the bootc step; bootc install writes it for systemd-boot images, but if you ever target a grub2 image (don't — we hardcode `--bootloader systemd`) the path may differ |
+| BLS entries dir | Engine's BLS step edits `*.conf` under the ESP's `loader/entries` (where bootc's composefs backend writes them), falling back to `/boot/loader/entries` for older bootc; if you ever target a grub2 image (don't — we hardcode `--bootloader systemd`) the path may differ |
 | Daemon idle-exit timer | 30 s after `Completed` signal; matches the PackageKit one-shot pattern. Cancellable installs (between steps) reset the timer. The DBus service is reactivated cleanly by another `Install()` call. |
 | GUI ↔ daemon disconnects | If the daemon dies mid-install, the GUI receives no further signals and never hits Done. There's no retry/reconnect logic yet. |
 | Cargo build in BST sandbox | Always `--frozen --offline` (not `--locked`) per cosmic-build-meta's rule for vendored builds |
